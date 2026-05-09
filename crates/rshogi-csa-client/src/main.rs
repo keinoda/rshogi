@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Parser, ValueEnum};
@@ -25,7 +25,7 @@ use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::{SpawnOptions, UsiEngine};
 use rshogi_csa_client::events::SessionOutcome;
 use rshogi_csa_client::jsonl::write_game_jsonl;
-use rshogi_csa_client::protocol::{CsaConnection, GameResult};
+use rshogi_csa_client::protocol::{CsaConnection, GameResult, compute_effective_retry_delay};
 use rshogi_csa_client::record::save_record;
 use rshogi_csa_client::session::{run_game_session, run_resumed_session};
 use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
@@ -194,6 +194,57 @@ struct Cli {
     no_engine_stderr_passthrough_flag: bool,
 }
 
+/// `delay` が経過するか `shutdown` が立つまで待機する。`shutdown` 検出時は早期に
+/// `false` を返し、呼び出し側はループを抜けるべき (= サーバ指定の長い `retry_after`
+/// を honor する間に Ctrl-C しても即座に終了できる)。
+///
+/// 単純な `std::thread::sleep(delay)` は signal を観測できないため、`SHUTDOWN_POLL`
+/// 刻みで分割 sleep して shutdown を polling する。粒度は「Ctrl-C から終了までの
+/// 体感遅延」と「polling overhead」のトレードオフで 200ms 固定 (#682 follow-up)。
+const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
+
+fn sleep_with_shutdown(delay: Duration, shutdown: &AtomicBool) -> bool {
+    let deadline = Instant::now().checked_add(delay);
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+        let sleep_for = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return true;
+                }
+                remaining.min(SHUTDOWN_POLL)
+            }
+            // overflow (例: `retry_after=u64::MAX`): deadline を計算できないので
+            // shutdown が立つまで SHUTDOWN_POLL 刻みで polling し続ける。実害は
+            // 低い (server が `u64::MAX` を返す事は無く、shutdown は必ずいずれ立つ)。
+            None => SHUTDOWN_POLL,
+        };
+        std::thread::sleep(sleep_for);
+    }
+}
+
+/// retry sleep の log 出力 + `sleep_with_shutdown` の組合わせを 1 か所に集約する。
+/// `acquire_lobby_match` / `run_one_game` の Err arm がそれぞれ同じブロックを
+/// 持つと将来の log フォーマット変更で片方の修正が漏れるため、helper 化している。
+///
+/// 戻り値は `sleep_with_shutdown` をそのまま転送し、`false` のとき呼び出し側は
+/// 連続対局ループを抜けるべき。
+fn sleep_retry(effective: Duration, backoff: Duration, shutdown: &AtomicBool) -> bool {
+    if effective > backoff {
+        log::warn!(
+            "サーバから retry_after を受信。{}秒後にリトライ (バックオフ {}秒を上書き)...",
+            effective.as_secs(),
+            backoff.as_secs()
+        );
+    } else {
+        log::info!("{}秒後にリトライ...", effective.as_secs());
+    }
+    sleep_with_shutdown(effective, shutdown)
+}
+
 /// CLI で `--engine-stderr-passthrough` / `--no-engine-stderr-passthrough` のいずれかが
 /// 明示指定された場合のみ `Some(bool)` を返す。未指定時は `None` を返し、TOML/環境変数の
 /// 値をそのまま温存する。`overrides_with` のため両方指定後に最後に勝った方の flag のみ
@@ -287,8 +338,10 @@ fn main() -> Result<()> {
                     if shutdown.load(Ordering::SeqCst) {
                         break;
                     }
-                    log::info!("{}秒後にリトライ...", retry_delay.as_secs());
-                    std::thread::sleep(retry_delay);
+                    let effective = compute_effective_retry_delay(&e.to_string(), retry_delay);
+                    if !sleep_retry(effective, retry_delay, &shutdown) {
+                        break;
+                    }
                     retry_delay =
                         (retry_delay * 2).min(Duration::from_secs(config.retry.max_delay_sec));
                     continue;
@@ -346,8 +399,10 @@ fn main() -> Result<()> {
                 }
                 // エラー後はエンジンを再起動（不整合な状態の可能性）
                 engine.quit();
-                log::info!("{}秒後にリトライ...", retry_delay.as_secs());
-                std::thread::sleep(retry_delay);
+                let effective = compute_effective_retry_delay(&e.to_string(), retry_delay);
+                if !sleep_retry(effective, retry_delay, &shutdown) {
+                    break;
+                }
                 retry_delay =
                     (retry_delay * 2).min(Duration::from_secs(config.retry.max_delay_sec));
                 engine = spawn_engine(&config)?;
@@ -1151,6 +1206,80 @@ mod tests {
     fn cli_engine_stderr_passthrough_no_flag_only_returns_some_false() {
         let cli = parse_cli(&["--no-engine-stderr-passthrough"]);
         assert_eq!(cli_engine_stderr_passthrough(&cli), Some(false));
+    }
+
+    // ───────────────────────────────────────────────
+    // `sleep_with_shutdown` の挙動を pin する。retry_after で長時間 sleep する間も
+    // Ctrl-C (= shutdown 立ち) を即座に観測して loop を抜けられる契約 (#682 follow-up)。
+    // `compute_effective_retry_delay` の test は protocol.rs 側に集約。
+    // ───────────────────────────────────────────────
+
+    #[test]
+    fn sleep_with_shutdown_completes_when_shutdown_remains_clear() {
+        // shutdown が立たないまま delay が経過したら true を返す。
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        let completed = sleep_with_shutdown(Duration::from_millis(120), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(completed, "delay 経過時は true を返すべき");
+        assert!(
+            elapsed >= Duration::from_millis(120),
+            "delay 未満で帰ってはいけない: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_with_shutdown_returns_false_when_shutdown_set_before_call() {
+        // 既に shutdown が立っている場合は最初の poll で false。
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        let completed = sleep_with_shutdown(Duration::from_secs(60), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(!completed);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "事前 shutdown は即座に return すべき: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_with_shutdown_handles_huge_delay_when_shutdown_already_set() {
+        // server が異常に大きい retry_after を返しても Instant 加算 overflow で
+        // panic せず、shutdown が立っていれば即座に抜ける。
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        let completed = sleep_with_shutdown(Duration::from_secs(u64::MAX), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(!completed);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "巨大 delay でも事前 shutdown は即座に return すべき: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_with_shutdown_returns_false_when_shutdown_set_during_sleep() {
+        // 別スレッドから sleep 中に shutdown を立てると、SHUTDOWN_POLL の粒度で
+        // 即座に抜けられること。`retry_after=900` 等の長時間 sleep でも 200ms 程度で
+        // 終了する契約を pin する。
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            shutdown_clone.store(true, Ordering::SeqCst);
+        });
+
+        let start = Instant::now();
+        let completed = sleep_with_shutdown(Duration::from_secs(60), &shutdown);
+        let elapsed = start.elapsed();
+        signal.join().expect("signal thread");
+
+        assert!(!completed, "shutdown 検出時は false を返すべき");
+        // 200ms poll + 50ms 起床遅延 + 余裕で 1s 以内に return すること。
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "shutdown 検出後は SHUTDOWN_POLL 粒度で抜けるべき: {elapsed:?}"
+        );
     }
 
     /// `--engine-stderr-passthrough --no-engine-stderr-passthrough` の順で指定された場合は
