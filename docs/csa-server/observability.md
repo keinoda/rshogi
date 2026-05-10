@@ -3,7 +3,7 @@
 [Issue #625](https://github.com/SH11235/rshogi/issues/625) で整備する 24/7 無人運用基盤の運用手順。
 
 - **Phase A** (✅ 完了 [PR #691](https://github.com/SH11235/rshogi/pull/691)): `structured_log!` macro 導入、全 `console_log!` を JSON 化
-- **Phase B** (🟡 部分完了 [PR #698](https://github.com/SH11235/rshogi/pull/698) + [PR #700 で本 doc 訂正](https://github.com/SH11235/rshogi/issues/700)): Cloudflare Notifications → Slack webhook 経路は実機検証済 (✅)。Workers Logs → R2 archive 経路は **Workers Free plan で利用不可** が判明し延期 (Paid plan 移行時に再活性化、§7 参照)
+- **Phase B** (🟡 部分完了 [PR #698](https://github.com/SH11235/rshogi/pull/698) + [issue #700](https://github.com/SH11235/rshogi/issues/700) を [PR #701](https://github.com/SH11235/rshogi/pull/701) で本 doc 訂正): Cloudflare Notifications → Slack webhook 経路は実機検証済 (✅)。Workers Logs → R2 archive 経路は **Workers Free plan で利用不可** が判明し延期 (Paid plan 移行時に再活性化、§7 参照)
 - **Phase C** (✅ 完了 [PR #671](https://github.com/SH11235/rshogi/pull/671) で [#630](https://github.com/SH11235/rshogi/issues/630) と統合): synthetic monitoring
 
 > **Workers Free plan 制約 (本 doc の前提)**: rshogi-csa-server-workers は 2026-05-10 時点で Workers Free plan で運用しており、`workers_trace_events` dataset の Logpush は API レベルで `code 1004: exceeded max jobs allowed` で reject される (Free plan は 0 job 許可)。本 doc は Free plan 前提で書かれている。Paid plan 移行時は §7 に従って Logpush + R2 archive 経路を再活性化する。
@@ -155,7 +155,7 @@ wrangler tail rshogi-csa-server-workers --format json \
 wrangler tail rshogi-csa-server-workers --format json \
   | jq -c '.logs[]?.message[]? | fromjson? // empty | select(.event == "room_join")'
 
-# 特定 game_id を時系列で (リアルタイム strem なので "時系列" は到着順)
+# 特定 game_id を時系列で (リアルタイム stream なので "時系列" は到着順)
 wrangler tail rshogi-csa-server-workers --format json \
   | jq -c '.logs[]?.message[]? | fromjson? // empty | select(.game_id == "<game_id>")'
 
@@ -348,6 +348,7 @@ Logpush archive (NDJSON) の各行は `workers_trace_events` の **wrapper objec
 
 ```bash
 # 直近 1 時間分の logs を local にダウンロード
+# ※ date -d は GNU date (Linux) 専用。macOS (BSD date) では `date -u -v-1H +%Y%m%dT%H` を使う
 wrangler r2 object list rshogi-csa-logs-prod --prefix "$(date -u -d '1 hour ago' +%Y%m%dT%H)" --remote 2>&1 | head -20
 wrangler r2 object get rshogi-csa-logs-prod <object_key> --file /tmp/logs.ndjson.gz --remote
 gunzip -k /tmp/logs.ndjson.gz   # /tmp/logs.ndjson が展開される
