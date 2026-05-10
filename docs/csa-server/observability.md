@@ -20,8 +20,10 @@
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Notifications (account-level)                    │
-│   - 配信先 webhook 1 件 (rshogi-staging-alerts) のみ登録済     │
-│   - alert policy は本 PR スコープ外で未追加 (§7.2 参照)         │
+│   - 配信先 webhook 1 件 (rshogi-staging-alerts) 登録済         │
+│   - NotificationPolicy は API 直作成 (Pulumi v6.15.0 が       │
+│     workers_observability_alert を未対応のため、§6.1 参照)     │
+│   - 具体的 alert rule 定義は Cloudflare Dashboard (user manual)│
 └────────┬────────────────────────────────────────────────────┘
          │ POST request (Cloudflare-format JSON payload、Cloudflare が
          │ Slack 形式と判別して dispatch する type=slack 設定)
@@ -49,7 +51,8 @@ Workers console output ↓ Logpush (NDJSON、30 秒 batch、enabled flag で gat
 | R2 bucket (logs archive) | `rshogi-csa-logs-prod` | `rshogi-csa-logs-staging` | ✅ 作成済 (Free plan では空、Paid 移行時に Logpush 投入先) | `infra/pulumi/index.ts` |
 | NotificationPolicyWebhooks | (未作成) | `rshogi-staging-alerts` (id `e9e6102c...`) | ✅ staging のみ作成済、Slack 疎通確認済 | `infra/pulumi/index.ts` |
 | LogpushJob | – | – | ❌ Free plan で作成不可、config 投入で declare をスキップ | `infra/pulumi/index.ts` (scaffold 維持) |
-| NotificationPolicy | – | – | ❌ 本 PR スコープ外、別 PR で追加 (§7.2 参照) | `infra/pulumi/index.ts` (scaffold 維持) |
+| NotificationPolicy `workers_observability_alert` 用 | (未作成) | `rshogi-staging-workers-observability` | ⚠️ Pulumi v6.15.0 alertType enum 未対応のため API 直作成 (§6.1 Step 2 参照)、Pulumi declare は provider 対応後に別 PR | (Pulumi 不可) |
+| NotificationPolicy `logpushFailureAlert` | – | – | ❌ Free plan で logpushJob 不在のため依存 chain skip、Paid 移行時に自動 active | `infra/pulumi/index.ts` (scaffold 維持) |
 
 **Pulumi scaffold 設計**: `infra/pulumi/index.ts` の `readOptionalSecret(key)` ヘルパーで「config 値が unset または空文字列なら resource 自体を declare しない」条件分岐を持たせており、Free plan では Logpush 関連 config を投入しないことで自動的にスキップされる。Paid plan 移行時は §7.1 に従って config 投入のみで Logpush + alert を再活性化できる。
 
@@ -256,24 +259,24 @@ pulumi up
 
 `NotificationPolicyWebhooks` の `url` のみ差し替わる (Cloudflare は新 URL pattern から `type` を再判定、Discord の場合 generic webhook として扱われる)。HMAC 検証する場合は translator Worker 内で `cf-webhook-auth` header を別途検証する (Cloudflare が自動で付ける header、Pulumi config の `alertWebhookSecret` は Slack 直結用途では使えなかった (§3.2.3 参照) ので translator Worker 側に独自 secret を持たせる設計とする)。
 
-## 6. Free plan で実用的な alert 追加方針 (別 PR)
+## 6. Free plan で実用的な alert 追加方針
 
 `/available_alerts` API を Free plan + 本アカウントで叩いた結果 (2026-05-10)、本 use case (Worker 監視) で利用可能な alertType は以下 4 種に絞られる:
 
 | alertType | カテゴリ | 用途 | Worker での実用性 |
 |---|---|---|---|
-| `workers_observability_alert` | Workers Observability | Workers Observability ダッシュボードで定義した custom alert rule (errors > N / 5min 等) が発火 → webhook 配信 | ✅ **本命**、自由に発火条件を組める |
-| `health_check_status_notification` | Health Checks | Cloudflare Health Check リソース別途セットアップ必須 (HTTP probe を URL 指定 → DOWN 検知時発火) | △ 別 resource 必要だが補完的に有用 (uptime 監視) |
+| `workers_observability_alert` | Workers Observability | Workers Observability ダッシュボードで定義した custom alert rule (errors > N / 5min 等) が発火 → webhook 配信 | ✅ **本命**、自由に発火条件を組める ([本 PR で実装済](https://github.com/SH11235/rshogi/issues/703)) |
+| `health_check_status_notification` | Health Checks | Cloudflare Health Check リソース別途セットアップ必須 (HTTP probe を URL 指定 → DOWN 検知時発火) | △ 別 resource 必要だが補完的に有用 (uptime 監視、§6.2 参照、別 PR) |
 | `security_insights_alert` | Security Insights | Cloudflare の Security Insights (新規脅威検知) 一般、zone 全体向け | △ Worker specific ではないが受信して損なし |
 | `real_origin_monitoring` | Traffic Monitoring | "Cloudflare → origin 不到達" 検知。Workers は Cloudflare 内部実行で origin 概念なし | ❌ Worker には適用されない (zone-attached origin 専用) |
 
 **`dos_attack_l7` 等の DoS Protection alertType は Free plan の `/available_alerts` 結果に出現せず、Free plan は基本 DDoS 保護のみで configurable alert は Paid 限定** (これも 2026-05-10 検証で判明)。
 
-### 6.1 推奨実装方針 (`workers_observability_alert` ベース)
+### 6.1 `workers_observability_alert` 配信経路セットアップ (本 PR + user manual)
 
-別 PR で以下を実装:
+#625 Phase B 続編で本 PR (#703 / [#704](https://github.com/SH11235/rshogi/pull/704)) が実装するもの:
 
-1. **`wrangler.{production,staging}.toml` に `[observability]` block 追加** (Workers Observability を有効化、Free plan 対応):
+1. ✅ **`wrangler.{production,staging}.toml` に `[observability]` block 追加** (Workers Observability を有効化、Free plan 対応):
    ```toml
    [observability]
    enabled = true
@@ -281,17 +284,86 @@ pulumi up
    enabled = true
    head_sampling_rate = 1.0
    ```
-2. **Cloudflare Dashboard → Workers & Pages → 該当 Worker → "Observability" → "Alerts"** で具体的な発火条件を Web UI で定義 (例: `5xx errors > 10 in 5min` や `CPU time > 50ms p99` 等)
-3. **Pulumi で `workers_observability_alert` の NotificationPolicy を declare** して `alertWebhook` へ routing (本 doc の `infra/pulumi/index.ts` `logpushFailureAlert` ブロックを `alertType: "workers_observability_alert"` に書き換える形)
+2. ⚠️ **NotificationPolicy `workers_observability_alert` の Pulumi declare は本 PR で見送り**:
+   - 2026-05-10 時点 `@pulumi/cloudflare` v6.15.0 の `NotificationPolicy.alertType` Available values list に `workers_observability_alert` が **未収録** (provider auto-generated schema が Cloudflare 側の最近追加に追従していない)
+   - Cloudflare API 自体は本 alertType を accept する (PR #701 で `/available_alerts` 検証済)
+   - Pulumi provider の schema validation で reject されるため、現時点では **API 直叩き or Dashboard UI 経由で作成** する代替手順を用いる
+   - provider が `workers_observability_alert` をサポートした時点で本ファイルに resource として追加する別 PR を起票
 
-### 6.2 補完: `health_check_status_notification`
+#### Bootstrap 手順 (PR merge 後、user manual)
+
+##### Step 1: wrangler deploy で `[observability]` 反映
+
+```bash
+cd crates/rshogi-csa-server-workers
+# 既存の deploy 経路を使う (CI または手動):
+# CI (推奨): GitHub Actions の deploy-workers.yml を kick
+# 手動: pnpm exec wrangler deploy --config wrangler.staging.toml
+```
+
+deploy 完了で Cloudflare Workers の Observability 機能が有効化され、過去 7 日分の log を Workers Observability dashboard で検索可能になる (Free plan)。
+
+##### Step 2: NotificationPolicy を API で作成 (Pulumi 不可、user manual)
+
+```bash
+ACCOUNT_ID="d5d9818649d8722f73cd798c3b1ffb70"
+TOKEN=$(cd /path/to/rshogi/infra/pulumi && pulumi config --show-secrets --json | jq -r '.["cloudflare:apiToken"].value')
+WEBHOOK_ID="e9e6102cf9d64192b5c2443dd70ec9f8"  # rshogi-staging-alerts (PR #698 で作成済の id、最新は API list で確認)
+
+curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/policies" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg wid "$WEBHOOK_ID" '{
+    name: "rshogi-staging-workers-observability",
+    description: "Workers Observability dashboard で定義した custom alert rule が発火した時に Slack へ routing。#625 Phase B 続編 PR #704 で API 直作成 (Pulumi v6.15.0 の alertType enum に未収録のため)。",
+    alert_type: "workers_observability_alert",
+    enabled: true,
+    alert_interval: "30m",
+    mechanisms: {
+      webhooks: [{ id: $wid }]
+    }
+  }')" | jq '.result | {id, name, alert_type, enabled}'
+```
+
+> **`alert_interval: "30m"`**: `workers_observability_alert` は continuous fire 型で閾値超過が続く間に複数回発火し得る。30 分間隔で同じ incident からの通知を 1 回に絞ることで Slack 過剰通知を防ぐ ([Codex review #704 で指摘](https://github.com/SH11235/rshogi/pull/704))。
+
+##### Step 3: Cloudflare Dashboard で具体的な alert rule を定義 (user manual)
+
+NotificationPolicy は「rule が発火したら webhook に届ける」routing のみ。**具体的な発火条件は Cloudflare Dashboard UI で別途定義** する必要がある (Pulumi provider に Workers Observability alert rule resource は無い):
+
+> **以下の Dashboard 階層は 2026-05 時点の推測ベース** で実機未検証。staging で実際に rule 作成手順を踏んだ後、本節を実 UI で書き直す TODO を残す ([Codex review #704 で指摘](https://github.com/SH11235/rshogi/pull/704))。
+
+1. https://dash.cloudflare.com/d5d9818649d8722f73cd798c3b1ffb70/workers-and-pages
+2. 該当 Worker (`rshogi-csa-server-workers` / `rshogi-csa-server-workers-staging`) を選択
+3. 上部タブまたはサイドバーで **"Observability"** → さらに **"Alerts"** subsection (UI 構造は変動可能性あり、見つからなければ Logs / Metrics 周辺を探す)
+4. **"Create alert"** で rule 定義:
+   - Rule name: 任意 (例: `worker exception burst`)
+   - Filter: Workers Observability の log filter 構文で記述 (`Outcome` field は HTTP status ではなく Worker の **実行結果分類** で `ok` / `exception` / `exceededCpu` / `exceededMemory` / `scriptNotFound` / `unknown` の値域。HTTP 5xx を Worker が正常に return した場合は `Outcome == "ok"` のため、HTTP status での filter は別経路 (Workers Logs の `Logs` field 等) が必要)
+   - Threshold: 例 `> 10 in 5 minutes`
+   - Notification: Step 2 で作成した NotificationPolicy が **default で適用される** (alertType マッチで Cloudflare が自動 routing)、追加で email 等を選ぶことも可能
+5. Save → 以降該当 rule が threshold 超過したら Slack channel に通知
+
+推奨初期 rule (個人運用 + 低トラフィック前提):
+
+| Rule 名 | Filter (Workers Observability 構文) | Threshold | 用途 |
+|---|---|---|---|
+| `worker exception burst` | `Outcome != "ok"` (= exception / exceededCpu / scriptNotFound 等) | `> 5 in 10 minutes` | Worker 実行失敗多発検知 (HTTP 5xx 正常 return とは独立、panic / throw / CPU 超過等) |
+| `dispatch latency p99 spike` | (Workers Observability metric、`WallTimeMs` p99) | `p99 wallTime > 200ms in 10 minutes` | レイテンシ劣化検知 |
+
+具体的な filter 構文は Workers Observability dashboard 上の query builder で確認しながら定義する。
+
+##### Future: 複数 Worker 追加時の filter 検討
+
+現時点 (Worker 1 本) では NotificationPolicy 側に `filters` を付けず、Cloudflare Dashboard rule 側で Worker script を選んで定義する設計で十分。将来 account に別 Worker が追加された場合、その Worker の `workers_observability_alert` rule も本 NotificationPolicy で routing される可能性があるため、追加 Worker 出現時に filter フィールドによる Worker script 絞り込みを検討する ([Codex review #704 で指摘](https://github.com/SH11235/rshogi/pull/704))。
+
+### 6.2 補完: `health_check_status_notification` (別 PR)
 
 **uptime 監視** として推奨。手順:
 
 1. Cloudflare Dashboard → Traffic → Health Checks → "Create" で `https://csa.sh11235.com/health` 等を 1 分間隔 probe する Health Check を作成
 2. Pulumi で `health_check_status_notification` NotificationPolicy を declare、`filters.healthCheckIds` に Health Check ID を指定 (Pulumi cloudflare provider に Health Check resource もある、`cloudflare.HealthCheck`)
 
-本 doc 範囲外、別 PR で扱う (#625 follow-up issue として起票推奨、または直接小さい PR を起票)。
+本 doc 範囲外、uptime 監視が必要になった時点で別 PR を起票する (#625 follow-up issue 起票 or 直接小さい PR)。
 
 ## 7. Paid plan 移行時の手順
 

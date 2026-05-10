@@ -247,19 +247,23 @@ export const logpushJob = logpushDestinationConf
 
 // ---- NotificationPolicy (alert ルール) -----------------------------------
 //
-// Phase B 初版では「Logpush 自体が止まったら alert」の 1 件のみ宣言する。
-// これは observability の根幹 (logs が止まれば alert もできなくなる) を
-// 守る fail-safe。追加 alert (5xx burst / DO error 等) は別 PR で
-// 同パターンで extend する (本ファイルに `additionalNotificationPolicies` 配列を
-// 足す形で増やせる)。
+// `logpushFailureAlert`: Logpush job が連続失敗で Cloudflare 側に
+// 自動 disable された時に発火 (= observability 根幹の fail-safe)。
+// LogpushJob 依存なので Free plan では declare されない (logpushJob === undefined)。
+// Paid plan 移行で logpushJob が active 化された時に自動的に declare 候補になる。
 //
-// alertType の選定:
-// - `failing_logpush_job_disabled_alert`: Logpush job が連続失敗で
-//   Cloudflare 側に自動 disable された時に発火 (=「ログが取れなくなった」検知)
-// - 5xx は Worker の場合 zone 経由ではなく Logpush データを external 監視で
-//   集計する方が確実 (Cloudflare Notifications の `http_alert_origin_error` は
-//   zone scope で Workers behind custom domain で限定的に動く)。本 PR では
-//   declare せず別 PR で `dos_attack_l7` 等と一緒に評価する。
+// `notificationsEnabled` config bool で enable/disable 制御。
+//
+// **`workers_observability_alert` は本ファイルでは declare しない**:
+// 2026-05-10 時点 `@pulumi/cloudflare` v6.15.0 の NotificationPolicy
+// `alertType` Available values list に `workers_observability_alert` が
+// 未収録 (`failing_logpush_job_disabled_alert` 等は含まれる)。Cloudflare API
+// 自体は本 alertType を accept する (PR #701 で `/available_alerts` 検証済) が、
+// Pulumi provider の schema validation で reject されるため Pulumi declare 不可。
+// 代替として Cloudflare API 直叩き or Dashboard UI 経由で NotificationPolicy
+// を作成する手順を `docs/csa-server/observability.md` §6.1 に明記する。
+// provider が `workers_observability_alert` をサポートしたら別 PR で
+// 本ファイルに `workersObservabilityAlert` resource として追加する。
 
 const notificationsEnabled =
     config.getBoolean("notificationsEnabled") ?? false;
@@ -272,11 +276,11 @@ export const logpushFailureAlert =
               alertType: "failing_logpush_job_disabled_alert",
               enabled: notificationsEnabled,
               description:
-                  "rshogi-csa-server-workers Logpush が連続失敗で disable された場合に発火。observability 根幹の fail-safe として #625 Phase B で declare。",
+                  "rshogi-csa-server-workers Logpush が連続失敗で disable された場合に発火。observability 根幹の fail-safe として #625 Phase B で declare。Workers Free plan では logpushJob 不在のため本 policy 自体も declare されない (Paid 移行時に自動 active)。",
               // `alertInterval` は本 alertType (failing_logpush_job_disabled_alert) では
               // Cloudflare Notifications API が無視する (single-shot alert として処理)。
-              // 5xx burst 等の continuous alert を別 PR で追加する際は `alertInterval: "30m"`
-              // を再導入する判断とする。
+              // continuous alert (例 worker exception burst を別 alertType で定義する場合等)
+              // を別 PR で追加する際は `alertInterval: "30m"` を再導入する判断とする。
               mechanisms: {
                   webhooks: [{ id: alertWebhook.id }],
               },
