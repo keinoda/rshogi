@@ -78,6 +78,7 @@ Workers console output ↓ Logpush (NDJSON、30 秒 batch、enabled flag で gat
 | 3.2.1 | `LogpushJob` (workers_trace_events dataset) を create | Cloudflare API `code 1004: exceeded max jobs allowed` (Workers Free plan は 0 job 許可) | Logpush 関連 config を `pulumi config rm` で削除して LogpushJob declare 自体をスキップ。Paid 移行時に再活性化 (§7.1) |
 | 3.2.2 | `NotificationPolicy logpushFailureAlert` (alertType=failing_logpush_job_disabled_alert) を create | LogpushJob 不在で alert 対象がない (依存 chain で Pulumi が自動 skip) | Logpush 非依存の alert (Free plan 利用可は `workers_observability_alert` 等、§6 参照) を別 PR で declare |
 | 3.2.3 | `pulumi config set --secret alertWebhookSecret <random>` を投入 | Cloudflare Notifications API が "secret field は URL embedded secret (PagerDuty 形式) との一致検証用、Slack URL には不要" と reject (`malformed request: url formatting error`) | `pulumi config rm alertWebhookSecret` で削除。Slack 直結時は secret 不要、Discord translator Worker 経由時は Worker 内で `cf-webhook-auth` header と独自 HMAC 検証する設計に変更 (§5) |
+| 3.2.4 | `wrangler.{production,staging}.toml` に `logpush = true` を keep (PR #698 で追加、PR #704 直前まで「Free plan で no-op」と誤解) | Workers Free plan は `logpush` フラグ自体を deploy gate で reject、`A request to the Cloudflare API .../workers/scripts/{name} failed. You do not have access to use Logpush. [code: 10023]` で **deploy job が error 終了 (3 連続失敗)** | PR #704 post-merge fixup で両 toml の該当行をコメントアウト。Paid plan 移行後に有効化する手順は §7.3 参照 |
 
 ### 3.3 再 bootstrap 時の手順 (新環境向け)
 
@@ -448,9 +449,21 @@ pulumi up
 
 `infra/pulumi/index.ts` の現コードは `alertWebhook && logpushJob` の両方が存在する時のみ NotificationPolicy を declare する条件分岐があり、§7.1.2 で logpushJob が active 化されると自動的に NotificationPolicy 候補に乗る。
 
-### 7.3 wrangler.toml の `logpush = true` 確認
+### 7.3 wrangler.toml の `logpush = true` を有効化
 
-Free plan 時点でも forward-compat で `logpush = true` を `wrangler.{production,staging}.toml` に設定済 ([PR #698](https://github.com/SH11235/rshogi/pull/698) で追加)。Paid 移行時に追加変更は不要。
+`wrangler.{production,staging}.toml` で `logpush = true` 行が **コメントアウトされている** はず ([PR #704 post-merge fixup](https://github.com/SH11235/rshogi/pull/704) で対応、Free plan は `logpush` フラグを deploy gate で reject する `code 10023` の事故を経て訂正)。Paid 移行後は両 toml の該当行のコメントを外して `logpush = true` を有効化:
+
+```toml
+# 修正前 (Free plan)
+# logpush = true
+
+# 修正後 (Paid plan)
+logpush = true
+```
+
+両 toml を変更 → 通常の deploy 経路 (CI `deploy-workers.yml` または手動 `wrangler deploy`) で反映。
+
+> **教訓**: `wrangler.toml` 上の `logpush = true` は **Free plan で no-op ではなく deploy gate** (Cloudflare API `/workers/scripts/{name}` PUT request が plan check で reject)。Paid plan に upgrade する **前** に有効化してはいけない。逆に upgrade 直後 (Workers Logpush quota が allocate された) には有効化を忘れない。
 
 ### 7.4 production への展開
 
