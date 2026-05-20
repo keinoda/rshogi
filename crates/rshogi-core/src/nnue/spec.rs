@@ -170,14 +170,30 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     if arch_str.contains("LayerStacks") {
         return Ok(FeatureSet::LayerStacks);
     }
-    // bullet-shogi LayerStacks 形式の判定:
-    // - Threat= を含むモデルは必ず LayerStacks
-    // - SqrClippedReLU を含むモデルは bullet-shogi LayerStacks（L2 活性化が SCReLU）
-    //   nnue-pytorch 単体モデルは ClippedReLU のみ使用
-    if arch_str.contains("Threat=") || arch_str.contains("SqrClippedReLU") {
+    // Threat= は LayerStacks 専用マーカ
+    if arch_str.contains("Threat=") {
         return Ok(FeatureSet::LayerStacks);
     }
-    // HalfKP/HalfKA_hm/HalfKA のキーワードを先に判定（FT_OUT が LayerStacks と衝突するため）
+
+    // 活性化混在トークン: bucketed LayerStacks の構造的指紋。L1→L2 が SCReLU 系、
+    // L2→Out が CReLU 系で両者が混在する場合は LayerStacks として確定する。
+    // bucket 無しアーキは片方の活性化トークンしか出ない。
+    //
+    // `(ClippedReLU[` を開きカッコ付きで照合することで `(SqrClippedReLU[` 内部の
+    // `ClippedReLU[` 部分文字列を弾く。
+    //
+    // 注意: arch 文字列だけで「単一活性化 LayerStacks」と「bucket 無し」を区別する
+    // のは原理的に不可能なため、keyword (Features=HalfKA_hm 等) が存在する場合は
+    // keyword 側を優先する。LayerStacks の単一活性化バリアントは現状の engine
+    // network_layer_stacks 実装では存在せず、もし将来加わる場合は明示的に
+    // `LayerStacks` キーワードか `Threat=` マーカを arch 文字列に含めるものとする。
+    let has_mixed_activations =
+        arch_str.contains("(SqrClippedReLU[") && arch_str.contains("(ClippedReLU[");
+    if has_mixed_activations {
+        return Ok(FeatureSet::LayerStacks);
+    }
+
+    // Features= 名前で feature_set 決定
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
     }
@@ -194,7 +210,8 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
             _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
         };
     }
-    // キーワードが無い LayerStacks モデル（bullet-shogi 形式）: FT_OUT パターンで判定
+
+    // HalfKX キーワードを持たないネスト形式 LayerStacks: FT_OUT パターンで補完判定
     if arch_str.contains("->1536x2]")
         || arch_str.contains("->768x2]")
         || arch_str.contains("->512x2]")
@@ -614,6 +631,9 @@ mod tests {
 
     #[test]
     fn test_parse_feature_set_from_arch() {
+        // keyword (HalfKA_hm) は LayerStacks/Threat=/混在トークンが無い限り優先。
+        // FT_OUT=512 は LayerStacks フォールバックパターンと被るが、keyword 優先で
+        // HalfKA_hm として返される（FT_OUT フォールバックは keyword 非該当時のみ）。
         assert_eq!(
             parse_feature_set_from_arch(
                 "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-96]"
@@ -646,6 +666,48 @@ mod tests {
         let err = parse_feature_set_from_arch("Features=HalfKA,Network=AffineTransform[1<-96]")
             .unwrap_err();
         assert!(err.contains("missing input dimensions"));
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_screlu() {
+        // bucket 無し SCReLU: `(SqrClippedReLU[` トークンのみ。混在トークンに該当
+        // しないため keyword で HalfKA_hm を返す。旧実装は SqrClippedReLU 単独でも
+        // LayerStacks と誤分類していた。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_crelu() {
+        // bucket 無し CReLU: `(ClippedReLU[` トークンのみ。混在トークンに該当せず
+        // → keyword で HalfKA_hm を返す。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_512_preset() {
+        // bucket 無し 512x2 preset: FT_OUT が LayerStacks フォールバックパターンと
+        // 衝突するが、混在トークン非該当 + keyword 優先で HalfKA_hm を返す
+        // (FT_OUT フォールバックは keyword 非該当時のみ)。
+        let arch = "Features=HalfKA_hm(Friend)[73305->512x2],Network=AffineTransform\
+                    [1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](\
+                    AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_layerstacks_mixed_activations() {
+        // LayerStacks: `(SqrClippedReLU[` と `(ClippedReLU[` の混在トークンを持つ
+        // ため keyword (HalfKA_hm) より優先して LayerStacks と確定する。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform\
+                    [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
+                    AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::LayerStacks);
     }
 
     #[test]
