@@ -234,10 +234,12 @@ mod unix_main {
                 let mut fields = line.split(',');
                 let count = fields.next().unwrap_or_default().trim();
                 let _unit = fields.next().unwrap_or_default();
-                let event = fields.next().unwrap_or_default().trim();
-                if event.is_empty() {
+                let event_raw = fields.next().unwrap_or_default().trim();
+                if event_raw.is_empty() {
                     continue;
                 }
+                // WSL2 等の user-mode only perf では `cycles:u` のように modifier が付く
+                let event = event_raw.split(':').next().unwrap_or(event_raw);
 
                 let value = parse_perf_count(count)?;
                 match event {
@@ -1087,6 +1089,24 @@ mod unix_main {
             assert_eq!(counters.cycles, Some(2574890));
             assert_eq!(counters.instructions, Some(2118685));
             assert_eq!(counters.branches, Some(443459));
+        }
+
+        // WSL2 等 perf_event_paranoid 制限下では event 名に `:u` modifier が付く
+        #[test]
+        fn parse_perf_csv_strips_user_mode_modifier() {
+            let csv = "\
+2574890,,cycles:u,431219,100.00,,\n\
+2118685,,instructions:u,729879,100.00,0.82,insn per cycle\n\
+443459,,branches:u,729879,100.00,,\n\
+1234,,cache-misses:u,729879,100.00,,\n\
+5678,,L1-dcache-load-misses:u,729879,100.00,,\n\
+";
+            let counters = PerfCounters::parse(csv).expect("perf CSV with :u should parse");
+            assert_eq!(counters.cycles, Some(2574890));
+            assert_eq!(counters.instructions, Some(2118685));
+            assert_eq!(counters.branches, Some(443459));
+            assert_eq!(counters.cache_misses, Some(1234));
+            assert_eq!(counters.l1_dcache_load_misses, Some(5678));
         }
 
         #[test]
