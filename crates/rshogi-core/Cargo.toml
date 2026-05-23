@@ -9,6 +9,7 @@ repository = "https://github.com/sh11235/rshogi"
 keywords = ["shogi", "japanese-chess", "game", "engine", "nnue"]
 categories = ["games", "game-engines"]
 readme = "README.md"
+build = "build.rs"
 
 [dependencies]
 # Workspace dependencies
@@ -43,10 +44,11 @@ rayon = { version = "1.10", optional = true }
 web-time = "1"
 
 [features]
-# 探索経路では pass_rights / PASS NMP を無効化
+# 探索経路では pass_rights / PASS NMP を無効化。
 # Web/WASM で pass ルールを使う場合は default-features=false で無効化する。
 default = ["search-no-pass-rules", "layerstacks-1536x16x32"]
-# デバッグ機能
+
+# === 開発・診断・横断系 (Edition 軸非対象) ===
 debug = []
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = []
@@ -54,66 +56,103 @@ search-stats = []
 nnue-stats = []
 # SIMD最適化（AVX2）
 simd_avx2 = []
-# 診断ログ
 diagnostics = []
-# WebAssembly スレッドビルド用フラグ
-# wasm-bindgen-rayon + rayon を使用した LazySMP 並列探索を有効化
+# WebAssembly スレッドビルド (wasm-bindgen-rayon + rayon で LazySMP)。
 # 詳細は docs/wasm-multithreading-investigation.md を参照。
 wasm-threads = ["rayon"]
 # アプリ向け指し手特徴量抽出（解説生成等で使用）
 move-features = []
-# TT trace / helper TT write 制御（並列探索デバッグ用）
+# TT trace / helper TT write 制御（並列探索デバッグ用）。
 # 有効時は環境変数で制御: RSHOGI_DEBUG_TT_TRACE, RSHOGI_DEBUG_TT_SANITY,
-# RSHOGI_DISABLE_HELPER_TT_WRITE, RSHOGI_TT_TRACE_ROOT_MOVE 等
+# RSHOGI_DISABLE_HELPER_TT_WRITE, RSHOGI_TT_TRACE_ROOT_MOVE 等。
 tt-trace = []
-# TT hit時の非PVノードで TT eval を再利用する（USE_LAZY_EVALUATE相当）
-# 無効時は YO 現行ビルド整合のため常に NNUE 再評価する
+# TT hit時の非PVノードで TT eval を再利用する（USE_LAZY_EVALUATE相当）。
+# 無効時は YO 現行ビルド整合のため常に NNUE 再評価する。
 use-lazy-evaluate = []
-# YaneuraOu DEEP相当のデフォルト遅延設定を使う
-# GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
+# YaneuraOu DEEP相当のデフォルト遅延設定 (GPU/ネットワーク待ち向け遅延マージン 400/1400ms)。
 deep = []
-# 探索経路限定で pass_rights を無効化（Position/MoveGen の pass 機能は保持）
+# 探索経路限定で pass_rights を無効化（Position/MoveGen の pass 機能は保持）。
 search-no-pass-rules = []
-# LayerStack 専用ビルド（大会向け production 用）
-# HalfKP/HalfKaSplit/HalfKaHmMerged のコードを除去し、evaluate_dispatch の icache footprint を削減
-layerstack-only = []
-# LayerStacks 1536x16x32 バリアント（従来アーキテクチャ）
-layerstacks-1536x16x32 = []
-# LayerStacks 1536x32x32 バリアント
-layerstacks-1536x32x32 = []
-# LayerStacks 768x16x32 バリアント
-layerstacks-768x16x32 = []
-# LayerStacks 512x16x32 バリアント
-layerstacks-512x16x32 = []
-# NNUE PSQT ショートカット対応
-# 無効時: AccumulatorLayerStacks から psqt_accumulation を除去、PSQT モデル読み込み不可
-nnue-psqt = []
-# NNUE Threat 特徴量対応
-# 無効時: AccumulatorLayerStacks から threat_accumulation を除去 (-6KB/entry)、Threat モデル読み込み不可
-nnue-threat = []
-# Threat exclusion profiles (mutually exclusive)
-# 除外 pair で Threat 次元を削減し、NPS を改善する。
+# Threat exclusion profiles (mutually exclusive)。除外 pair で Threat 次元を削減し NPS を改善。
 # 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
+
+# === Edition 軸 atomic feature 群 ===
+# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
+# atomic feature は実装詳細扱いで、user は基本的に preset edition feature 経由で
+# 触る想定 (preset edition は別 PR で追加予定)。
+
+# Architecture 経路 slot。
+# - ls-arch:     LayerStack network 経路を有効化
+# - halfkx-arch: HalfKX family (HalfKP / HalfKa*) 経路を有効化
+# 現状 `ls-arch` は「LS を含めて HalfKX 経路を除去」する意味論を継承しており、
+# `halfkx-arch` と同時指定すると build.rs で reject される。
+ls-arch     = []
+halfkx-arch = []
+
+# LayerStack network L1 サイズ slot
+ls-size-1536x16x32 = []
+ls-size-1536x32x32 = []
+ls-size-768x16x32  = []
+ls-size-512x16x32  = []
+
+# LayerStack 拡張 slot (psqt / threat)
+# - ls-ext-psqt:   AccumulatorLayerStacks に psqt_accumulation を含める。PSQT モデル読み込み可。
+# - ls-ext-threat: AccumulatorLayerStacks に threat_accumulation を含める (+6KB/entry)。Threat モデル読み込み可。
+ls-ext-psqt   = []
+ls-ext-threat = []
+
+# FT (Feature Transformer) 種別 slot。
+# 現状 LS network は ft-halfka_hm_merged 専用、他 4 variant は LS 側で未対応のため
+# build.rs check で reject される (HalfKX 経路では将来全 variant に対応予定)。
+ft-halfkp           = []
+ft-halfka_split     = []
+ft-halfka_merged    = []
+ft-halfka_hm_split  = []
+ft-halfka_hm_merged = []
+
+# HalfKX activation slot
+halfkx-activation-crelu    = []
+halfkx-activation-screlu   = []
+halfkx-activation-pairwise = []
+
+# Build mode sentinel (preset edition がセット、build.rs 整合性チェック用)。
+# user が直接指定するものではなく、preset edition 経由でのみ有効化される想定。
+# - mode-universal: 全 architecture × 構成 dispatch、check 緩和
+# - mode-family:    family dispatch、check 部分緩和
+# - mode-specific:  単一構成 build、check 厳格 (size/activation/ft 1 個固定)
+mode-universal = []
+mode-family    = []
+mode-specific  = []
+
 # NNUE progress8kpabs バケットの差分更新最適化
 # - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
 #   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新
-# - Threat なし環境: +3〜4% NPS（有効）
-# - Threat あり環境: -2% NPS（cache 圧迫で退行）
+# - L0=1536 系で性能向上、L0=768/512 で退行する trade-off
+# - 適用条件: build.rs で mode-specific + ls-size-1536x16x32 / ls-size-1536x32x32 を強制
+#   (mode-* が未指定の互換 build では check 緩和、user 責任で組合せ可)
 # default では無効。運用モデルの特性に応じてビルド時に明示指定する。
 nnue-progress-diff = []
+
+# === 旧 feature 名 alias ===
+# 旧 build スクリプト・CI 設定がそのまま動くよう alias で互換維持する。
+layerstack-only        = ["ls-arch"]
+layerstacks-1536x16x32 = ["ls-size-1536x16x32"]
+layerstacks-1536x32x32 = ["ls-size-1536x32x32"]
+layerstacks-768x16x32  = ["ls-size-768x16x32"]
+layerstacks-512x16x32  = ["ls-size-512x16x32"]
+nnue-psqt              = ["ls-ext-psqt"]
+nnue-threat            = ["ls-ext-threat"]
 
 [lib]
 name = "rshogi_core"
 path = "src/lib.rs"
 
-# PSQT 統計ダンプツール
-# `NetworkLayerStacks1536x16x32` のロードを行うため、`nnue-psqt` に加えて
-# `layerstacks-1536x16x32` が同時に有効な構成でのみビルドする。
-# （未対応構成では `cargo build --bin dump_psqt_stats` が
-#   "requires the features: nnue-psqt, layerstacks-1536x16x32" で明示的に失敗する）
+# PSQT 統計ダンプツール。
+# `NetworkLayerStacks1536x16x32` のロードに `ls-ext-psqt` と `ls-size-1536x16x32`
+# の両方が必要なため、`required-features` で明示する (alias 経由の旧名指定でも動く)。
 [[bin]]
 name = "dump_psqt_stats"
 path = "src/bin/dump_psqt_stats.rs"
-required-features = ["nnue-psqt", "layerstacks-1536x16x32"]
+required-features = ["ls-ext-psqt", "ls-size-1536x16x32"]
