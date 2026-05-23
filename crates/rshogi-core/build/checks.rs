@@ -11,32 +11,6 @@ fn validate_feature_combination(
     let ls_arch = has_feature("ls-arch");
     let halfkx_arch = has_feature("halfkx-arch");
 
-    // `ls-arch` は現状「LS を含めて HalfKX 経路を除去」の意味論なので
-    // `halfkx-arch` と組合せると build 構成が不整合になる。
-    if ls_arch && halfkx_arch {
-        return Err(
-            "ls-arch と halfkx-arch は同時指定できません \
-             (`ls-arch` は HalfKX 経路を除去する意味論のため)。"
-                .to_string(),
-        );
-    }
-
-    // LS network 上で動く FT は現状 `ft-halfka_hm_merged` のみ実装済み。
-    if ls_arch {
-        for ft in &[
-            "ft-halfkp",
-            "ft-halfka_split",
-            "ft-halfka_merged",
-            "ft-halfka_hm_split",
-        ] {
-            if has_feature(ft) {
-                return Err(format!(
-                    "LayerStack (ls-arch) network は現状 ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
-                ));
-            }
-        }
-    }
-
     let mode_universal = has_feature("mode-universal");
     let mode_family = has_feature("mode-family");
     let mode_specific = has_feature("mode-specific");
@@ -77,6 +51,26 @@ fn validate_feature_combination(
         return Err(
             "ls-arch を有効化するには ls-size-* を 1 個以上必要です。".to_string(),
         );
+    }
+
+    // LS-only build (ls-arch + halfkx-arch なし) では HalfKX 経路がコンパイルされて
+    // いないため、ft-halfka_hm_merged 以外を立てると runtime に HalfKX モデルを load
+    // した際 `evaluate_dispatch` の `unreachable!` arm に到達してパニックする。
+    // mode (family / universal / specific) に関わらず build-time で reject する。
+    if ls_arch && !halfkx_arch {
+        for ft in &[
+            "ft-halfkp",
+            "ft-halfka_split",
+            "ft-halfka_merged",
+            "ft-halfka_hm_split",
+        ] {
+            if has_feature(ft) {
+                return Err(format!(
+                    "LS-only build (ls-arch + not(halfkx-arch)) では \
+                     ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
+                ));
+            }
+        }
     }
 
     if mode_specific {
