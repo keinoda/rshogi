@@ -27,132 +27,86 @@ user-invocable: true
 - スレッド: 1
 - ハッシュ: 256MB
 - 各方向の対局数: 100（双方向で200局/カード）
-- 並列数: 20
 - NNUE: エンジンごとに `--engine-usi-option` で個別指定
 
-## ビルドの注意
+### 対局条件は必ずユーザーに相談して決める (デフォルト値を勝手に採用しない)
 
-### Build profile
+以下の条件は **起動前に必ずユーザー確認**。推奨値とトレードオフを示した上で尋ね、
+ユーザーが明示した場合のみその値を使う。前回の SPRT で使った値を**暗黙に踏襲しない**。
 
-NPS 比較を含む評価では、**全エンジンを同一の build profile でビルドすること**。
+#### (a) 並列数 (`--concurrency`)
 
-- `--release` (release profile): `lto=thin`, `codegen-units=4`, `overflow-checks=true`
-- `--profile production` (production profile): `lto=fat`, `codegen-units=1`, `overflow-checks=false`
+マシンの空き CPU は時々で異なり (学習・他ベンチが同時稼働していることが多い)、過剰
+並列は時間制対局の実効 NPS/depth を下げて評価品質を落とす一方、過少だと無駄に時間が
+かかる。確認時は「現在の CPU 負荷状況 (同時稼働中の学習/ベンチの有無とスレッド数)」を
+添えて尋ねる。
 
-production は release より約 1.5% 低い instruction/node を達成する。異なる profile のバイナリを比較すると、コード変更に起因しない NPS 差が発生し、評価結果にバイアスが生じる。
+#### (b) time control: `--byoyomi` vs `--nodes`
 
-**`/tmp/` に保存された過去のバイナリを基準に使う場合は、どの profile でビルドされたかを必ず確認すること。** 不明なら再ビルドして揃える。
+**比較するエンジン構成によって選択則が異なる**:
 
-### Cargo feature（NNUE モデル別）
-
-各モデルに対して**必要十分な feature を指定**してビルドすること。feature が不足するとモデル読み込み失敗、過剰だと不要なコードパスや accumulator フィールドが残り NPS にバイアスが生じる。
-
-**最新の feature 名は必ず実コードを確認すること**:
-```bash
-grep -E '^[a-z][a-z0-9-]+ =' /mnt/nvme1/development/rshogi/crates/rshogi-core/Cargo.toml
-```
-
-**モデル → feature 対応表**（2026-05 時点）:
-
-feature は以下の4カテゴリの組み合わせで構成する:
-
-1. **dispatch 除去**: `layerstack-only`（LayerStack モデルでは常に指定）
-2. **L1×L2 サイズ**: 以下を**1つだけ**指定。複数同時有効は cycles +5.5% 退行
-   - `layerstacks-1536x16x32`（**default**, L0=1536, L1=16, L2=32, v100/v101 等の最新系）
-   - `layerstacks-1536x32x32`（L0=1536, L1=32, L2=32, v87/v88 等の旧 L1=32 系）
-   - `layerstacks-768x16x32`
-   - `layerstacks-512x16x32`
-3. **アーキテクチャ拡張**: `nnue-psqt`, `nnue-threat`（モデルに応じて）
-4. **最適化**: `nnue-progress-diff`（L1=1536 で有効。L0=768 系では cache pressure 増加により cycles +2〜6% 退行するため指定しない）
-
-| モデル種別 | 例 | 必須 feature |
+| 比較軸 | 推奨 time control | 理由 |
 |---|---|---|
-| LayerStack 1536x16x32 (新標準) | v100 | `layerstack-only,nnue-progress-diff`（default で `layerstacks-1536x16x32`） |
-| LayerStack 1536x16x32 + PSQT | v101 | `layerstack-only,nnue-psqt,nnue-progress-diff` |
-| LayerStack 1536x32x32 | v87 (旧) | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-progress-diff` |
-| LayerStack 1536x32x32 + PSQT | v88 (旧) | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-psqt,nnue-progress-diff` |
-| LayerStack 1536x16x32 + Threat | v89, v91-1536 | `layerstack-only,nnue-threat` |
-| LayerStack 1536x16x32 + PSQT + Threat | v90 | `layerstack-only,nnue-psqt,nnue-threat` |
-| LayerStack 768x16x32 + Threat | v91-768 系 | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32,nnue-threat` |
-| LayerStack 512x16x32 | | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-512x16x32` |
-| HalfKA_HM | danbo-v20 等 | (feature 指定なし、デフォルトで可) |
+| **同 FS 同 arch、重み差のみ (recipe / 量子化 / SPSA 差等)** | **`--nodes <N>`** (固定ノード) | NPS 差なし、CPU 競合の影響も排除して clean に重み差を抽出 |
+| **異 FS / 異 arch (feature-set 差、dim 差、PSQT 有無差等)** | **`--byoyomi <ms>`** (固定時間) | 実戦強度 = eval 品質 × NPS。NPS 差を含めた total strength を測る |
+| (補助) 異 FS で eval 品質を切り分けて測りたい | 両方 (固定時間 + 固定ノード) | featureset-sweep 実験ログ (rshogi-nnue docs/experiments) §10-F / §10-E pattern |
 
-**注意**:
-- `layerstacks-1536x16x32` がデフォルト feature。`1536x32x32`/`768x16x32`/`512x16x32` 等を使うには
-  `--no-default-features` で外し、`search-no-pass-rules`（デフォルト含）を再指定する。
-- `nnue-progress-diff` は L0=1536 限定の最適化。L0=768/512 では `StackEntryLayerStacks` の cache pressure 増加で退行する。
-- 過去の `layerstacks-1536`（L1/L2 を区別しない）feature は廃止済み。`layerstacks-1536x16x32` または `layerstacks-1536x32x32` を使うこと。
+異 FS 対局を固定ノードでやると、本来実戦強度に効く NPS 差 (例: HalfKP の avg_nodes
+は HalfKA_HM_merged より +6-14% 多い) を切り捨ててしまい、デプロイ実態と乖離する。
+**「前回固定ノードだったから今回も」と暗黙踏襲は禁止**、比較軸ごとに毎回相談する。
 
-```bash
-# 768x16x32 + Threat モデル用の例
-cargo build --profile production -p rshogi-usi \
-  --no-default-features \
-  --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32,nnue-threat
-```
+#### (c) SPRT 仮説と上限局数
 
-**`layerstack-only` の効果**: HalfKP/HalfKA/HalfKA_HM のコードを除去し、`evaluate_dispatch` を直接呼び出しにバイパスする。LayerStack モデル同士の比較では常に指定すべき。
+- `--sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta`: 検出したい最小 Elo 差と
+  許容誤り率。デフォルト (H0=0 / H1=+5 / α=β=0.05) は出発点だが、解像度を上げたい /
+  下げたい場合は別の値が必要。
+- `--games`: 上限局数。境界に達しなかった場合の打ち切り基準。長時間 run になり得る
+  ので CPU 占有見積もりとともに確認。
 
-**ビルド例**:
-```bash
-# v100 用（LayerStack 1536x16x32, PSQT なし）— default feature を活用
-cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-progress-diff
-cp target/production/rshogi-usi engines/rshogi-usi-1536x16x32-<purpose>
+#### (d) startpos / engine USI option
 
-# v101 用（LayerStack 1536x16x32 + PSQT）
-cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-psqt,nnue-progress-diff
-cp target/production/rshogi-usi engines/rshogi-usi-1536x16x32-psqt-<purpose>
-```
+これらはモデル / 評価目的に依存。startpos は `data/startpos/start_sfens_ply32.txt`
+が default だが他にもある。USI option (FV_SCALE / LS_BUCKET_MODE / LS_PROGRESS_COEFF 等)
+はモデルごとに必要なものが異なる。デフォルト 1 つに固執せず、対象モデルから判断 +
+不明なら確認。
 
-**重要**: `cargo build` は同一 profile で feature が異なっても同じ出力パスに書き出す。異なる feature のバイナリが必要な場合は、ビルド直後に別名にコピーすること。2つ目のビルドで1つ目が上書きされる。
+## ビルドの注意 (pre-flight 必須 3 点)
 
-### バイナリ退避先
+engine build / feature 構成 / format 互換性の詳細は
+[`edition-build` SKILL](../edition-build/SKILL.md) を参照。selfplay 起動前に
+必ず以下を確認:
 
-長期保持したい評価用バイナリは **`engines/`** ディレクトリ（gitignored）に置く。
-`target/production/` は `cargo clean` で消える可能性、`/tmp/` は再起動で揮発するため。
-命名規則と既存バイナリの一覧は `engines/README.md` を参照。
+1. **同一 build profile** で全 engine を揃える (release / production 混在は NPS 比較に
+   バイアス、`<binary>.meta.toml` で確認)
+2. **NNUE format 互換性**: 使う ckpt の `nnue_ver` (例: `0x7af32f21` = 最新) を engine が
+   読めること。`usi` → `isready` で `readyok` 確認、`Unknown NNUE version: 0x...` が
+   出たら engine 再 build (`cargo run --release -p xtask -- build --edition <name>
+   --profile production`)
+3. **preset edition** 経由 (`xtask build`) が最も安全。手動 `cargo build` は feature
+   漏れ / 過剰でバイアス源になる (過剰 feature は `readyok` 通過しても余分な accumulator
+   field 残留で NPS に出る)
+
+build trace は `engines/<binary>.meta.toml` に edition / profile / commit / built_at が
+記録されるので、流用前に必ず確認。
 
 ## 実行手順
 
-### 1. ビルド条件の決定とバイナリ準備
+### 1. engine binary 準備
 
-#### 1a. 各エンジンの必要 feature を決定
+build / preset edition / feature 構成の詳細は
+[`edition-build` SKILL](../edition-build/SKILL.md) を参照。selfplay 観点での最低要件:
 
-NNUE モデル比較の場合、モデルごとに必要な Cargo feature が異なる。
-上記「モデル → feature 対応表」を参照し、各エンジンに必要十分な feature セットを決定する。
-
-**判断基準**: モデルのアーキテクチャ（LayerStack サイズ、PSQT 有無、Threat 有無）から feature を特定する。不明な場合はモデルの実験ドキュメント（`bullet-shogi/docs/experiments/`）を参照。
-
-#### 1b. ビルドと退避
-
-feature が異なるバイナリが複数必要な場合、**ビルド → 即座に別名コピー** を繰り返す。
-`cargo build` は同一 profile・同一 crate で feature が異なっても同じ出力パスに書き出すため、
-コピーしないと次のビルドで上書きされる。
-
-```bash
-# 例: v87 用と v88 用を順番にビルド
-cargo build --profile production -p rshogi-usi --features layerstack-only,layerstacks-1536,nnue-progress-diff
-cp target/production/rshogi-usi target/production/rshogi-usi-ls1536
-
-cargo build --profile production -p rshogi-usi --features layerstack-only,layerstacks-1536,nnue-psqt,nnue-progress-diff
-cp target/production/rshogi-usi target/production/rshogi-usi-ls1536-psqt
-```
-
-#### 1c. ビルド後の検証（必須）
-
-1. **ビルドコマンドの feature 確認**: 各バイナリが対応表どおりの feature でビルドされたことを、ビルドログ（`cargo build` の出力）で確認する。feature が不足していればモデル読み込み時にエラーになるが、**過剰な feature は readyok を通過してしまい検出できない**。ビルドコマンド自体が正しいことを確認するのが唯一の手段。
-
-2. **モデル読み込み確認**: 各バイナリに対象モデルを読み込ませて `readyok` を確認する（feature 不足の検出）。
-   ```bash
-   echo -e "usi\nsetoption name EvalFile value {MODEL_PATH}\n{OTHER_OPTIONS}\nisready\nquit" \
-     | timeout 10 {BINARY_PATH} 2>&1 | grep -E 'readyok|Error|panic'
-   ```
-
-#### 1d. 既存バイナリの利用
-
-事前ビルド済みバイナリを使う場合は、以下を確認する:
-- どの profile (`release` / `production`) でビルドされたか
-- どの feature でビルドされたか
-- 不明なら再ビルドして揃える
+- **モデル比較なら preset 経由で build**: `cargo run --release -p xtask -- build
+  --edition <name> --profile production`。preset 一覧は `xtask list-editions`
+- **既存 binary を流用するなら meta.toml で edition / profile / commit 確認**
+  (features は記録されないので edition 名から逆引き)、ckpt format との整合が
+  取れない (`Unknown NNUE version: 0x...`) なら rebuild
+- **`usi` → `isready` で全 binary x 全 ckpt の load test を pre-flight**:
+  ```bash
+  echo -e "usi\nsetoption name EvalFile value {MODEL_PATH}\n{OTHER_OPTIONS}\nisready\nquit" \
+    | timeout 30 {BINARY_PATH} 2>&1 | grep -E 'readyok|Error|Unknown NNUE version|panic'
+  ```
+  `readyok` 確認できれば selfplay 起動 OK
 
 ### 2. 出力ディレクトリの作成
 
@@ -184,6 +138,10 @@ cargo run -p tools --release --bin tournament -- \
 - `--engine-usi-option "INDEX:Name=Value"`: エンジン個別の USI オプション（0始まりインデックス）。
   デフォルトでは共通 `--usi-option` にマージされ、同じキーは engine 個別指定が上書きする。
   旧挙動の完全置換が必要な場合は `--strict-engine-usi-option` を併用する。
+- **基準エンジンとの比較（1v1 含む）では `--base-label` を必ず付ける**。base-vs-N モードに
+  なるだけでなく、meta 行に `base_label` が記録され、後から `analyze_selfplay --sprt` を
+  ラベル指定なしで実行しても base/test の役割が自動推定される。`--engine` の指定順に
+  役割の意味は無い（ファイル名・meta の label_black/white は指定順のまま）。
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
   - `{label_i}-vs-{label_j}.jsonl`: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
@@ -315,14 +273,25 @@ final:       pairs=246, LLR=+3.002, decision=accept_h1
 
 既に `tournament` で回し終わったログから SPRT 判定を再現・再検討したいときは
 `analyze_selfplay --sprt` を使う。`pair_index` が書かれているログには
-無損失で復元できる。
+無損失で復元できる。**SPRT モードで起動していない通常 run のログでも使える**。
 
 ```
 cargo run -p tools --release --bin analyze_selfplay -- \
-  runs/selfplay/{DIR}/*.jsonl \
-  --sprt --sprt-base-label base --sprt-test-label test \
-  --sprt-nelo0 0 --sprt-nelo1 5
+  runs/selfplay/{DIR}/*.jsonl --sprt
 ```
+
+base/test のラベルは以下の順で自動推定され、推定時は根拠が stderr に表示される:
+
+1. CLI 明示（`--sprt-base-label` / `--sprt-test-label`。片方だけ指定すれば他方は補完）
+2. meta の SPRT 情報（`tournament --sprt` で生成したログ）
+3. meta の `base_label` 記録（`tournament --base-label` で生成したログ）
+4. ラベル名に "base" を含む側を base と判断
+5. 最後の手段として label_black を test とみなす（警告付き）
+
+推定された役割が逆だったらラベルを明示して再実行する。レポートには
+`{test} (test) vs {base} (base)` と nelo/elo の視点が明記されるので、
+取り違えはレポート自体から判別できる。Wald パラメータは
+CLI → meta → 既定値 (nelo0=0, nelo1=5, α=β=0.05) の順で解決される。
 
 通常の集計出力の末尾に SPRT レポートが追加される（`--json` 併用時は JSON 出力に
 `sprt` フィールドが追加される）。
