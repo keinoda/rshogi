@@ -99,3 +99,5 @@ records/
 
 slides
 
+# ローカルの実験データ・スクリプト（記録・再現手順は private repo rshogi-notes の rshogi/ に集約）
+experiments/
