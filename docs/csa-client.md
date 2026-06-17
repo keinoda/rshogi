@@ -156,29 +156,59 @@ nohup cargo run -p rshogi-csa-client --release -- config.toml > csa.log 2>&1 &
 
 Ctrl+C (SIGINT) で現在の対局完了後にgracefulに終了する。
 
-### LAN内の自前サーバーで対局
+### LAN 内の自前サーバーで対局（`rshogi-csa-server-tcp`）
 
-[shogi-server](https://github.com/TadaoYamaoka/shogi-server) をサーバーとして起動:
+本リポジトリ同梱の TCP 対局サーバー `rshogi-csa-server-tcp` を建てれば、CSA-over-TCP で
+複数エンジンを対局させられる。起動・設定の詳細は
+[`csa-server/tcp-server.md`](csa-server/tcp-server.md) を参照。
 
-```bash
-# サーバー側（Ruby必要）
-cd shogi-server
-./shogi-server test 4081
-```
-
-2台のマシンで `csa_client` を接続。**パスワードに同じゲーム名を指定**するとマッチングされる:
+サーバー側（最小構成）。対局するハンドルとパスワードを `players.toml` に登録する:
 
 ```toml
-# ゲーム名の形式: <名前>-<持ち時間秒>-<秒読み秒>
-# 例: "match-300-10" → 持ち時間300秒 + 秒読み10秒
-# 末尾F でフィッシャー: "match-300-10F" → 300秒 + 1手10秒加算
+# players.toml
+[players.alice]
+password = "alicepw"
+
+[players.bob]
+password = "bobpw"
+```
+
+```bash
+cargo run -p rshogi-csa-server-tcp --release -- \
+  --bind 0.0.0.0:4081 --kifu-dir ./kifu --players ./players.toml
+# 既定は countdown 600 秒 + 10 秒読み（--clock-kind / --total-time-sec / --byoyomi-sec で変更）
+```
+
+クライアントは 2 台（または 2 プロセス）で接続する。LOGIN id は
+`<handle>+<game_name>+<color>` 形式で、`password` は `players.toml` の値。
+**同じ `<game_name>` + 逆の `<color>`** でマッチングする:
+
+```toml
+# 先手側
+[server]
+host = "192.168.1.100"   # サーバーの IP
+port = 4081
+id = "alice+casual-600-10+black"   # <handle>+<game_name>+<color>
+password = "alicepw"
+floodgate = false
+```
+
+```toml
+# 後手側
 [server]
 host = "192.168.1.100"
 port = 4081
-id = "engine_a"
-password = "match-300-10"
+id = "bob+casual-600-10+white"
+password = "bobpw"
 floodgate = false
 ```
+
+`<game_name>`（例 `casual-600-10`）はマッチングのプール名。`--clock-presets-toml` を
+渡さない限り任意の名前でよく、サーバーの global clock が全 game_name に適用される。
+
+> floodgate（`wdoor.c.u-tokyo.ac.jp`）や Ruby [shogi-server](https://github.com/TadaoYamaoka/shogi-server)
+> など外部 CSA サーバーにも同じ `csa_client` で接続できる（その場合は各サーバーの
+> LOGIN 規約に従う。floodgate は本ドキュメント冒頭の例を参照）。
 
 ## Cloudflare Workers (WebSocket) で対局する
 

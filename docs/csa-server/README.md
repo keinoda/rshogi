@@ -8,6 +8,10 @@
 
 - [`protocol-reference.md`](protocol-reference.md) — 本リポが受理する標準 CSA / x1 拡張 / 独自拡張 (Reconnect_Token / `BEGIN Reconnect_State` / Lobby `MATCHED`) を実装位置 (`file:line`) 付きで一覧する利用者向け参照 doc。**新規メンバの最初の 1 枚**。
 
+## 設計 / 運用 (TCP)
+
+- [`tcp-server.md`](tcp-server.md) — `rshogi-csa-server-tcp`（TCP フロントエンド）の起動・運用ガイド。`players.toml` / 時計設定 / マッチング / 定刻ラウンド (`[[schedules]]`) / 駒落ち / Floodgate 運用機能。自前マシンで対局・評価を回す場合の入口。
+
 ## 設計 / 運用 (Workers)
 
 - [`deployment.md`](deployment.md) — Cloudflare Workers の staging / production 構築・運用 runbook。
