@@ -30,18 +30,19 @@ use rshogi_csa_client::record::save_record;
 use rshogi_csa_client::session::{run_game_session, run_resumed_session};
 use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
 
-/// `--target` プリセット。本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の
-/// staging / production Worker への 1 コマンド接続を提供する。別アカウントの Worker に
-/// 接続する場合は `--target` を使わず TOML / `--host` で URL を直接指定する。
+/// `--target` プリセット。本リポ単一 Cloudflare アカウントの staging / production
+/// Worker（カスタムドメイン経由）への 1 コマンド接続を提供する。別アカウント /
+/// 自前 Worker に接続する場合は `--target` を使わず TOML / `--host` で URL を直接指定する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum TargetPreset {
-    /// staging Worker (`rshogi-csa-server-workers-staging.sh11235.workers.dev`)。
-    /// `WS_ALLOWED_ORIGINS = "https://csa-client-local"` allowlist 通過のため
-    /// `Origin: https://csa-client-local` を送る。
+    /// staging Worker (`stg.rshogi-csa-server.sh11235.com`)。
+    /// allowlist (`WS_ALLOWED_ORIGINS`) に登録された `https://csa-client-local` を
+    /// `Origin` として送る。
     Staging,
-    /// production Worker (`rshogi-csa-server-workers.sh11235.workers.dev`)。
-    /// `WS_ALLOWED_ORIGINS = ""` (空) の運用前提でネイティブ経路として Origin を
-    /// 送らない (=`ws_origin = None`)。
+    /// production Worker (`rshogi-csa-server.sh11235.com`)。
+    /// ネイティブ経路として Origin を送らない (=`ws_origin = None`)。production の
+    /// `WS_ALLOWED_ORIGINS` は非空だが、Origin 欠落リクエストは allowlist の内容に
+    /// 関わらず通過する。
     Production,
 }
 
@@ -729,22 +730,10 @@ fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
     })?;
 
     let (subdomain, ws_origin) = match target {
-        TargetPreset::Staging => (
-            "rshogi-csa-server-workers-staging.sh11235.workers.dev",
-            // staging Worker は `WS_ALLOWED_ORIGINS = "https://csa-client-local"` で
-            // この値を allowlist に登録済み。Origin を送ってブラウザ経路相当でも
-            // ネイティブ経路相当でも通電できるが、明示しておく方が allowlist 経路の
-            // 動作確認に資する。
-            Some("https://csa-client-local".to_owned()),
-        ),
-        TargetPreset::Production => (
-            "rshogi-csa-server-workers.sh11235.workers.dev",
-            // production Worker の `WS_ALLOWED_ORIGINS` は空 (空 allowlist 運用)。
-            // Origin 欠落 = ネイティブ経路として素通し、Origin 付きは 403 になる。
-            // web client 化したいときは wrangler.production.toml の allowlist に値を追加
-            // してから CLI で `--ws-origin <url>` を渡す運用に切り替える。
-            None,
-        ),
+        TargetPreset::Staging => {
+            ("stg.rshogi-csa-server.sh11235.com", Some("https://csa-client-local".to_owned()))
+        }
+        TargetPreset::Production => ("rshogi-csa-server.sh11235.com", None),
     };
     config.server.host = format!("wss://{subdomain}/ws/{room_id}");
     // `wss://` 経路では port 値は無視されるが、TOML schema 互換のため 0 を入れておく。
@@ -1012,10 +1001,7 @@ mod tests {
         cli.color = Some(CliColor::Black);
         cli.game_name = Some("byoyomi-msec-10-100".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
-        assert_eq!(
-            config.server.host,
-            "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-1"
-        );
+        assert_eq!(config.server.host, "wss://stg.rshogi-csa-server.sh11235.com/ws/e2e-1");
         assert_eq!(config.server.id, "alice+byoyomi-msec-10-100+black");
         assert_eq!(config.server.ws_origin.as_deref(), Some("https://csa-client-local"));
         assert!(!config.server.password.is_empty());
@@ -1031,10 +1017,7 @@ mod tests {
         cli.color = Some(CliColor::White);
         cli.game_name = Some("floodgate-600-10".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
-        assert_eq!(
-            config.server.host,
-            "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/game42"
-        );
+        assert_eq!(config.server.host, "wss://rshogi-csa-server.sh11235.com/ws/game42");
         assert_eq!(config.server.id, "bob+floodgate-600-10+white");
         assert!(config.server.ws_origin.is_none());
     }
@@ -1051,10 +1034,7 @@ mod tests {
         cli.color = Some(CliColor::Black);
         cli.game_name = Some("floodgate-600-10".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
-        assert_eq!(
-            config.server.host,
-            "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-room-1"
-        );
+        assert_eq!(config.server.host, "wss://stg.rshogi-csa-server.sh11235.com/ws/e2e-room-1");
         assert_eq!(config.server.id, "alice+floodgate-600-10+black");
     }
 
