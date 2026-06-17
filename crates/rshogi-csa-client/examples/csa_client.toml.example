@@ -50,9 +50,12 @@ startup_timeout_sec = 30
 USI_Hash = 256
 
 [time]
-# 秒読みの安全マージン（ms）。サーバ側 deadline と client 側 deadline のずれを
-# 吸収する。
-margin_msec = 2500
+# 秒読み(byoyomi)から差し引く安全マージン(ms)。bestmove がサーバ deadline 前に
+# 届くよう csa_client 層で byoyomi を削ってエンジンに渡す(btime/wtime は満額)。
+# rshogi-usi 等エンジン側に NetworkDelay/NetworkDelay2 がある場合は予約が二重に
+# 効き実効思考時間がさらに縮むので、片方を小さくして二重計上を避ける。自前の
+# 遅延予約を持たないエンジンでは margin_msec が唯一の安全弁になるため 0 にしない。
+margin_msec = 1500
 
 [game]
 max_games = 1

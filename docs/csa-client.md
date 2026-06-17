@@ -72,6 +72,12 @@ password = "your_password"
 floodgate = true  # 評価値・PVコメントを送信
 ```
 
+`host` の scheme で transport が決まる: `host:port` / `tcp://...` は TCP、
+`ws://...` / `wss://...` は WebSocket（Cloudflare Workers 版、`port` は無視）。
+Workers 版への接続は
+[Cloudflare Workers (WebSocket) で対局する](#cloudflare-workers-websocket-で対局する)
+を参照。
+
 ### `[engine]` — USIエンジン
 
 ```toml
@@ -90,10 +96,19 @@ Threads = 4
 
 ```toml
 [time]
-margin_msec = 2500  # 通信遅延を考慮した安全マージン
+margin_msec = 1500  # 通信遅延を考慮した安全マージン
 ```
 
-秒読みからこの値を差し引いてエンジンに渡す。ネットワーク越しの対局では大きめに設定。
+秒読みからこの値を差し引いてエンジンに渡す（`btime`/`wtime` は満額）。bestmove が
+サーバ側 deadline 前に届くようにするための csa_client 層のバッファで、ネットワーク
+越しの対局では大きめに設定する。
+
+> **エンジン側の遅延予約との二重計上に注意。** rshogi-usi など USI エンジンが
+> `NetworkDelay` / `NetworkDelay2` を持つ場合、エンジンも内部で同種の予約を行うため
+> `margin_msec` と**積み重なる**（秒読み 10s + `margin_msec=1500` + エンジン
+> `NetworkDelay=120` なら実効思考は約 8.4s）。rshogi-usi と組むなら片方を小さくして
+> 二重計上を避ける。一方、自前の遅延予約を持たないエンジンでは `margin_msec` が唯一の
+> 安全弁になるので `0` にしない。
 
 ### `[game]` — 対局設定
 
@@ -164,6 +179,128 @@ id = "engine_a"
 password = "match-300-10"
 floodgate = false
 ```
+
+## Cloudflare Workers (WebSocket) で対局する
+
+rshogi の対局場は Cloudflare Workers 版もあり、こちらは生 TCP ではなく
+**WebSocket** で接続する。`csa_client` は `[server] host` の scheme で transport を
+自動判別するので、`wss://` を指定すれば追加設定なしで WebSocket 接続になる
+（`wss://` の TLS provider はバイナリ起動時に自動登録される）。
+
+| transport | host の書き方 |
+|---|---|
+| TCP (floodgate / shogi-server) | `host = "wdoor.c.u-tokyo.ac.jp"` + `port` |
+| WebSocket (Workers) | `host = "wss://<ホスト>/ws/<room_id>"`（`port` は無視） |
+
+### LOGIN とマッチング
+
+Workers 版の GameRoom は LOGIN ID を **`<handle>+<game_name>+<color>`** の 3 部構成で
+要求する（`+` 区切り）。
+
+| 部分 | 意味 |
+|---|---|
+| `<handle>` | 表示名（任意の文字列） |
+| `<game_name>` | **時計プリセット名**。サーバ側 `CLOCK_PRESETS` に登録された名前を指定する |
+| `<color>` | `black`（先手） / `white`（後手） |
+
+`password` は LOGIN の**必須トークン**だが任意の文字列でよい（省略は不可。
+`WORKERS_HANDLE_AUTH` で当該 handle を登録した場合のみ検証され、それ以外は認証に
+使われない）。マッチングは 2 方式:
+
+- **直接ルーム** `/ws/<room_id>`: 2 人が **同じ room_id・逆の color** で接続すると対局開始。
+  `room_id` は ASCII 英数字・`-`・`_`、1〜128 文字。
+- **ロビー** `/ws/lobby`（`--lobby`）: `LOGIN_LOBBY` 送信 → サーバが相手を見つけて
+  `MATCHED` 通知 → 自動で割当ルームへ接続。**同じ `<game_name>` 同士**だけがマッチする。
+
+> **先手・後手（`<color>`）は必ず互いに逆にすること。** サーバは color を自動割当・
+> ランダム割当しないため、両者が `black` / `white` を明示し、かつ**反対の color** で
+> なければマッチしない（直接ルーム・ロビーとも）。同じ `room_id` / `game_name` でも
+> 2 人が同じ color を選ぶと対局は成立しない。「席おまかせ」での自動割当は未対応。
+
+公開インスタンスで使える `<game_name>`（時計プリセット例）:
+
+| game_name | 時計 |
+|---|---|
+| `floodgate-600-10` | 10 分 + 10 秒読み（Floodgate 互換） |
+| `byoyomi-120-5` | 2 分 + 5 秒読み |
+| `byoyomi-msec-10-100` | 10 秒 + 0.1 秒読み（高速 smoke 用） |
+
+### 公開インスタンスに参加する
+
+公開対局場の接続先は次の 2 つで、どちらも同じ production Worker に届く:
+
+- カスタムドメイン（推奨）: `wss://rshogi-csa-server.sh11235.com/ws/<room_id>`
+- `workers.dev`（`--target production` が内部で使う固定 URL）:
+  `wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/<room_id>`
+
+TOML 例（相手は同じ room へ `white` で接続する）:
+
+```toml
+[server]
+host = "wss://rshogi-csa-server.sh11235.com/ws/myroom-001"
+id = "alice+floodgate-600-10+black"   # <handle>+<game_name>+<color>
+password = "anything"
+floodgate = true
+
+[engine]
+path = "./target/release/rshogi-usi"
+
+[engine.options]
+Threads = 4
+EvalFile = "/path/to/nn.bin"
+```
+
+```bash
+cargo run -p rshogi-csa-client --release -- my_config.toml
+```
+
+バイナリ内蔵プリセット `--target production` でも同じサーバに繋げる（URL 指定不要）:
+
+```bash
+cargo run -p rshogi-csa-client --release -- \
+  --target production \
+  --room-id myroom-001 --handle alice --color black \
+  --game-name floodgate-600-10 \
+  --engine ./target/release/rshogi-usi \
+  --options "Threads=4,EvalFile=/path/to/nn.bin"
+```
+
+ロビー自動マッチング（同じ `--game-name` の相手と順次対局）:
+
+```bash
+cargo run -p rshogi-csa-client --release -- \
+  --target production --lobby \
+  --handle alice --color black --game-name floodgate-600-10 \
+  --max-games 0 \
+  --engine ./target/release/rshogi-usi \
+  --options "Threads=4,EvalFile=/path/to/nn.bin"
+```
+
+> `csa_client` はネイティブ経路（`Origin` ヘッダなし）で接続するため `ws_origin` は
+> **指定しないこと**。公開インスタンスの `WS_ALLOWED_ORIGINS` はブラウザ製クライアント
+> 向けの allowlist で、`ws_origin` を allowlist 外の値で指定すると `403` で弾かれる。
+
+### 自前の Worker に接続する
+
+`rshogi-csa-server-workers` を自分で deploy した場合は `--host`（または TOML）で
+その URL を指定する。`--target` は本リポ単一アカウントの URL 固定なので使わない。
+
+```toml
+[server]
+host = "wss://<your-worker>/ws/myroom-001"   # /ws/<room_id>
+id = "alice+floodgate-600-10+black"           # <handle>+<game_name>+<color>
+password = "anything"
+floodgate = true
+# Worker の WS_ALLOWED_ORIGINS が非空 かつ ブラウザ経路で繋ぐ場合のみ:
+# ws_origin = "https://<allowlist に登録した origin>"
+```
+
+サーバ側の時計設定（`CLOCK_KIND` / `CLOCK_PRESETS`）と deploy 手順は
+[`csa-server/clock_defaults.md`](csa-server/clock_defaults.md) /
+[`csa-server/deployment.md`](csa-server/deployment.md) を参照。
+`CLOCK_PRESETS = "[]"`（プリセット未登録）の Worker では `<game_name>` は任意で、
+グローバル既定時計が全 game_name に適用される。観戦・ライブ対局 API は
+[`csa-server/viewer_access_control.md`](csa-server/viewer_access_control.md) を参照。
 
 ## 出力
 

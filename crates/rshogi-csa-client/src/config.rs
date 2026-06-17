@@ -108,7 +108,7 @@ pub struct TimeConfig {
 
 impl Default for TimeConfig {
     fn default() -> Self {
-        Self { margin_msec: 2500 }
+        Self { margin_msec: 1500 }
     }
 }
 
