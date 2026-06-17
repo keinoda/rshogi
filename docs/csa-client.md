@@ -257,11 +257,11 @@ Workers 版の GameRoom は LOGIN ID を **`<handle>+<game_name>+<color>`** の 
 
 ### 公開インスタンスに参加する
 
-公開対局場の接続先は次の 2 つで、どちらも同じ production Worker に届く:
+公開対局場の接続先:
 
-- カスタムドメイン（推奨）: `wss://rshogi-csa-server.sh11235.com/ws/<room_id>`
-- `workers.dev`（`--target production` が内部で使う固定 URL）:
-  `wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/<room_id>`
+```
+wss://rshogi-csa-server.sh11235.com/ws/<room_id>
+```
 
 TOML 例（相手は同じ room へ `white` で接続する）:
 
