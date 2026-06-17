@@ -45,9 +45,15 @@ path = "/path/to/your/usi-engine"
 startup_timeout_sec = 30
 
 [engine.options]
-# USI options。エンジンが NNUE 評価を使う場合は `EvalFile` 等の追加 options を
-# 必要に応じて足す。
+# USI options。csa_client が起動時に `setoption name <key> value <val>` で
+# エンジンへ送る。USI エンジンは自前の設定ファイルを持たず、GUI/コントローラが
+# setoption で構成する仕組みで、ここでは csa_client がその役割を担う。エンジン
+# 固有オプション（Threads / EvalFile / BookFile 等）もすべてここに書く。
+# CLI `--options "K=V,..."` / `--hash` は同名キーを上書きする（CLI > この TOML）。
 USI_Hash = 256
+Threads = 4
+# EvalFile = "/path/to/nn.bin"
+# BookFile = "no_book"
 
 [time]
 # 秒読み(byoyomi)から差し引く安全マージン(ms)。bestmove がサーバ deadline 前に
