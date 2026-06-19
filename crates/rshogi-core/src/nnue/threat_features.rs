@@ -62,8 +62,8 @@
 //!     = 216,720
 //! ```
 //!
-//! Profile 1 (same-class) は 192,640、profile 2 (same-class-major-pawn) は 173,568。
-//! 詳細は [`super::threat_exclusion`] を参照。
+//! Profile 1 (same-class) は 192,640、profile 2 (same-class-major-pawn) は 173,568、
+//! profile 10 (cross-side) は 96,320。詳細は [`super::threat_exclusion`] を参照。
 //!
 //! # index 構造
 //!
@@ -171,6 +171,7 @@ use std::sync::LazyLock;
 /// Profile 0 (full): 216,720
 /// Profile 1 (same-class): 192,640
 /// Profile 2 (same-class-major-pawn): 173,568
+/// Profile 10 (cross-side): 96,320
 #[cfg(feature = "ls-ext-threat")]
 pub const THREAT_DIMENSIONS: usize = PAIR_DATA.1;
 
@@ -398,6 +399,7 @@ fn pair_base(
     if cfg!(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-cross-side",
     )) && base == EXCLUDED_PAIR_BASE
     {
         None
@@ -1449,6 +1451,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
 
@@ -1457,6 +1460,9 @@ mod tests {
 
         #[cfg(feature = "threat-profile-same-class-major-pawn")]
         assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (same-class-major-pawn)");
+
+        #[cfg(feature = "threat-profile-cross-side")]
+        assert_eq!(THREAT_DIMENSIONS, 96_320, "profile 10 (cross-side)");
     }
 
     #[test]
@@ -1661,9 +1667,19 @@ mod tests {
         let mut indices_w = Vec::new();
         append_active_threat_indices(&pos, Color::White, king_sq_w, &mut indices_w);
 
-        // 初期局面では threat pair が最低限含まれることを確認
-        assert!(!indices_b.is_empty(), "Black perspective should have threats");
-        assert!(!indices_w.is_empty(), "White perspective should have threats");
+        // 初期局面は両軍が接触しておらず敵駒への利きが無い。cross-side (敵味方跨ぎの
+        // 異種のみ) では同 side の利きが全除外され threat が 0 になる。それ以外の profile は
+        // 同 side の利きが残るため最低限含まれる。
+        #[cfg(feature = "threat-profile-cross-side")]
+        {
+            assert!(indices_b.is_empty(), "cross-side startpos should have no threats");
+            assert!(indices_w.is_empty(), "cross-side startpos should have no threats");
+        }
+        #[cfg(not(feature = "threat-profile-cross-side"))]
+        {
+            assert!(!indices_b.is_empty(), "Black perspective should have threats");
+            assert!(!indices_w.is_empty(), "White perspective should have threats");
+        }
 
         // 全 index が範囲内
         for &idx in &indices_b {
@@ -1681,6 +1697,7 @@ mod tests {
     #[cfg(not(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-cross-side",
     )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();

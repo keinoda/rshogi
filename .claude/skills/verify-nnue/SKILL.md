@@ -21,6 +21,7 @@ user-invocable: true
 - **threat-profile**: Threat 次元削減プロファイル。bullet/rshogi 両方のビルドに同一 feature を指定する必要がある
   - `threat-profile-same-class` (profile 1): 同種ペア全除外 (192,640 dims)
   - `threat-profile-same-class-major-pawn` (profile 2): 同種 + 大駒→歩除外 (173,568 dims)
+  - `threat-profile-cross-side` (profile 10): 同 side / 同種除外、敵味方跨ぎ異種のみ (96,320 dims)
 
 ### デフォルト値（変更不要なら省略可）
 - **progress.bin**: `$SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin`
@@ -191,7 +192,7 @@ cargo build --release -p rshogi-usi --no-default-features \
 # 以降は Case B と同様に eval diag で比較
 ```
 
-**⚠️ 重要**: profile 2 (`threat-profile-same-class-major-pawn`) の場合は上記の `threat-profile-same-class` を `threat-profile-same-class-major-pawn` に全て置き換えること。
+**⚠️ 重要**: profile 2 (`threat-profile-same-class-major-pawn`) / profile 10 (`threat-profile-cross-side`) の場合は上記の `threat-profile-same-class` を該当 profile feature に全て置き換えること。
 
 ---
 
