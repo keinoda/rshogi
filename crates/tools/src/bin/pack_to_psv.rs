@@ -37,7 +37,7 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use tools::common::dedup::collect_input_paths;
-use tools::packed_sfen::{PackedSfenValue, cshogi_move16_to_move, pack_position};
+use tools::packed_sfen::{PackedSfenValue, hcpe_move16_to_move, pack_position};
 
 #[derive(Parser, Debug)]
 #[command(name = "pack_to_psv")]
@@ -234,7 +234,7 @@ fn process_game(
         output.extend_from_slice(&psv.to_bytes());
         stats.positions += 1;
 
-        let target_mv = cshogi_move16_to_move(move16);
+        let target_mv = hcpe_move16_to_move(move16);
         if target_mv.is_none() {
             stats.move_errors += 1;
             return Ok(());

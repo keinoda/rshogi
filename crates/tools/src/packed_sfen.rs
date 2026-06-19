@@ -1025,13 +1025,12 @@ pub fn move16_to_move(move16: u16) -> Move {
     }
 }
 
-/// cshogi/GenSfen の move16 を rshogi の Move に変換
+/// hcpe / hcpe3 / .pack の move16 を rshogi の Move に変換する。
 ///
-/// cshogi の move16 は YaneuraOu とほぼ同じだが、ドロップの駒種が 0-indexed:
-///   - cshogi: from = 81 + hand_piece_type (PAWN=0, LANCE=1, ..., ROOK=6)
-///   - YaneuraOu: from = 81 + piece_type (PAWN=1, LANCE=2, ..., GOLD=7)
-///   - 成り: bit 14 (両方共通)
-pub fn cshogi_move16_to_move(move16: u16) -> Move {
+/// この move16 は通常手 `to | from<<7`、成り `| 0x4000`（bit14）、駒打ち
+/// `to | ((81 + idx)<<7)`（idx: 歩=0, 香=1, 桂=2, 銀=3, 角=4, 飛=5, 金=6）で表す
+/// （形式の参照実装 cshogi の `move16` と同一）。
+pub fn hcpe_move16_to_move(move16: u16) -> Move {
     if move16 == 0 {
         return Move::NONE;
     }
@@ -1041,7 +1040,7 @@ pub fn cshogi_move16_to_move(move16: u16) -> Move {
     let promote = (move16 & 0x4000) != 0;
 
     if from_or_pt >= 81 {
-        // 打ち駒 (cshogi: HPAWN=0, HLANCE=1, HKNIGHT=2, HSILVER=3, HBISHOP=4, HROOK=5, HGOLD=6)
+        // 駒打ちの駒種 index: 歩=0, 香=1, 桂=2, 銀=3, 角=4, 飛=5, 金=6
         let pt = match from_or_pt - 81 {
             0 => PieceType::Pawn,
             1 => PieceType::Lance,
@@ -1317,13 +1316,12 @@ pub fn move_to_move16(mv: Move) -> u16 {
     }
 }
 
-/// Move を cshogi の move16 形式に変換
+/// Move を hcpe / hcpe3 / .pack の move16 形式に変換する。
 ///
-/// cshogi の move16 は YaneuraOu とほぼ同じだが、ドロップの駒種が 0-indexed:
-///   - cshogi: `from = 81 + hand_piece_type` (Pawn=0, Lance=1, ..., Gold=6)
-///   - YaneuraOu: `from = 81 + piece_type` (Pawn=1, Lance=2, ..., Gold=7)
-///   - 成り: bit 14 (両方共通)
-pub fn move_to_cshogi_move16(mv: Move) -> u16 {
+/// 通常手 `to | from<<7`、成り `| 0x4000`（bit14）、駒打ち `to | ((81 + idx)<<7)`
+/// （idx: 歩=0, 香=1, 桂=2, 銀=3, 角=4, 飛=5, 金=6）で表す（形式の参照実装 cshogi の
+/// `move16` と同一）。
+pub fn move_to_hcpe_move16(mv: Move) -> u16 {
     if mv == Move::NONE || mv == Move::NULL {
         return 0;
     }
@@ -1331,7 +1329,7 @@ pub fn move_to_cshogi_move16(mv: Move) -> u16 {
     let to = mv.to().index() as u16;
 
     if mv.is_drop() {
-        // 駒打ち (cshogi: HPAWN=0, HLANCE=1, HKNIGHT=2, HSILVER=3, HBISHOP=4, HROOK=5, HGOLD=6)
+        // 駒打ちの駒種 index: 歩=0, 香=1, 桂=2, 銀=3, 角=4, 飛=5, 金=6
         let pt = mv.drop_piece_type();
         let hand_piece_index: u16 = match pt {
             PieceType::Pawn => 0,

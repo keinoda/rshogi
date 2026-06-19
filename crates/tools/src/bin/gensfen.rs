@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use tools::packed_sfen::{
-    PackedSfenValue, move_to_cshogi_move16, move_to_move16, move16_to_move, pack_position,
+    PackedSfenValue, move_to_hcpe_move16, move_to_move16, move16_to_move, pack_position,
     pack_position_hcp,
 };
 use tools::selfplay::{
@@ -700,7 +700,7 @@ impl TrainingDataCollector {
     /// フォーマット:
     ///   [開始局面フラグ: u8] — 1=平手, 0=任意局面
     ///   0 の場合: [HuffmanCodedPos: 32byte][game_ply: u16 LE]
-    ///   繰り返し: [move16(cshogi): u16 LE][score: i16 LE]
+    ///   繰り返し: [move16(hcpe): u16 LE][score: i16 LE]
     ///   [終局マーカー: u16 LE (from==to)] [終局理由: u8]
     fn finish_game_pack(&mut self, outcome: GameOutcome) -> Result<()> {
         let (hcp, start_ply, is_hirate) =
@@ -717,10 +717,10 @@ impl TrainingDataCollector {
 
         // 2. 各エントリの指し手とスコア
         for entry in &self.entries {
-            // YO move16 → Move → cshogi move16
+            // rshogi の move16 → Move → hcpe move16
             let mv = move16_to_move(entry.move16);
-            let cshogi_move16 = move_to_cshogi_move16(mv);
-            self.writer.write_all(&cshogi_move16.to_le_bytes())?;
+            let hcpe_move16 = move_to_hcpe_move16(mv);
+            self.writer.write_all(&hcpe_move16.to_le_bytes())?;
             self.writer.write_all(&entry.score.to_le_bytes())?;
             self.total_written += 1;
         }
