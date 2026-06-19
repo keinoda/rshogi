@@ -57,6 +57,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
@@ -2907,19 +2908,6 @@ where
         eprintln!("Resuming: skipped {skip} already-processed records");
     }
 
-    let mut f1_buf = vec![0.0f32; batch_size * f1_size];
-    let mut f2_buf = vec![0.0f32; batch_size * f2_size];
-    // qsearch-leaf-label モードで「葉で STM が反転したか」を局面ごとに記録するバッファ。
-    // f1/f2 と同様ループ外で 1 回確保し、各バッチ先頭で reset して再利用する。
-    let mut stm_flags = vec![false; batch_size];
-    // leaf-REPLACEMENT 有効時、葉局面の packed sfen を局面ごとに記録するバッファ。
-    // f1/f2 と同様ループ外で 1 回確保し再利用する。非有効時は pack を行わず空のまま。
-    let mut leaf_sfens: Vec<[u8; 32]> = if replacement_output.is_some() {
-        vec![[0u8; 32]; batch_size]
-    } else {
-        Vec::new()
-    };
-    let mut buffer = [0u8; PackedSfenValue::SIZE];
     let mut skipped_count: u64 = 0;
     let mut error_count: u64 = 0;
     let mut clipped_count: u64 = 0;
@@ -2934,309 +2922,456 @@ where
         MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
             .map_err(onnx_ort_err)?;
 
-    loop {
-        // バッチ分のレコードをストリーム読み込み。
-        // 注: 旧実装は `--skip-in-check` でこの段階で親をドロップしていたが、
-        // expand 機能（ポリシー推論）と独立に動かすため、推論は常に実行し、
-        // 王手フラグだけを記録して rescore 書き出し / expand 書き出しの個別判定に使う。
-        let mut batch_records: Vec<(PackedSfenValue, String, bool)> =
-            Vec::with_capacity(batch_size);
-        while batch_records.len() < batch_size && remaining > 0 {
-            if INTERRUPTED.load(Ordering::SeqCst) {
-                remaining = 0;
-                break;
-            }
-            remaining -= 1;
-            match reader.read_exact(&mut buffer) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    remaining = 0;
-                    break;
-                }
-                Err(e) => return Err(e.into()),
-            }
-            let psv = match PackedSfenValue::from_bytes(&buffer) {
-                Some(p) => p,
-                None => {
-                    error_count += 1;
-                    continue;
-                }
-            };
-            let sfen = match unpack_sfen(&psv.sfen) {
-                Ok(s) => s,
-                Err(_) => {
-                    error_count += 1;
-                    continue;
-                }
-            };
-            // 王手判定はバッチ読み込み時に 1 回だけ行う。ここで
-            // Position::set_sfen に失敗した場合は in_check=false 扱いとする
-            // （後段の特徴量構築で同じ局面を再パースしたときに失敗すれば
-            //  batch_errors → error_count に計上される）。
-            let mut probe = Position::new();
-            let in_check = match probe.set_sfen(&sfen) {
-                Ok(()) => probe.in_check(),
-                Err(_) => false,
-            };
-            batch_records.push((psv, sfen, in_check));
+    // フェーズ別 wall time 計測（RESCORE_PHASE_TIMING=1 のとき末尾で出力）。read/build は
+    // producer、run/write は consumer の別スレッドで計測するため、オーバーラップ分は
+    // 各フェーズの合算が wall を超える。供給コストと GPU コストの絶対値切り分けに使う。
+    let phase_timing = std::env::var_os("RESCORE_PHASE_TIMING").is_some();
+    let (mut t_run, mut t_write) = (0u128, 0u128);
+
+    // 推論バッチ 1 個分の CPU 成果物（読み込み済み records + 構築済み特徴量 + フラグ）。
+    // producer が埋め、consumer（主スレッド）が GPU 推論・書き出しに使う。f1/f2 等は
+    // slot プールで再利用し、ピークメモリは入力件数に非依存（PIPELINE_SLOTS 個ぶん）。
+    struct PreparedBatch {
+        f1: Vec<f32>,
+        f2: Vec<f32>,
+        records: Vec<(PackedSfenValue, String)>,
+        stm_flags: Vec<bool>,
+        in_checks: Vec<bool>,
+        leaf_sfens: Vec<[u8; 32]>,
+        actual_batch: usize,
+        errors: u64,
+    }
+
+    let want_leaf_sfens = replacement_output.is_some();
+
+    // 供給（read+build）と GPU 推論（session.run）を別スレッドにして直列実行をオーバーラップ。
+    // 王手 probe を build へ移したこととあわせ、GPU が CPU 前処理を待つアイドルを潰す。
+    // - producer: ストリーム読み込み（直列 I/O）+ rayon 並列特徴量構築
+    // - consumer（主スレッド）: ORT セッションで推論し結果を書き出し
+    // 決定性: from_bytes/unpack を直列段階に残しバッチ構成を不変に保つため、出力は逐次実装と
+    // bit 一致。slot は free/ready の 2 本のチャネルで循環し、同時生存は PIPELINE_SLOTS 個。
+    const PIPELINE_SLOTS: usize = 2;
+    let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
+        let (free_tx, free_rx) = mpsc::channel::<PreparedBatch>();
+        let (ready_tx, ready_rx) = mpsc::channel::<PreparedBatch>();
+        for _ in 0..PIPELINE_SLOTS {
+            free_tx
+                .send(PreparedBatch {
+                    f1: vec![0.0f32; batch_size * f1_size],
+                    f2: vec![0.0f32; batch_size * f2_size],
+                    records: Vec::with_capacity(batch_size),
+                    stm_flags: vec![false; batch_size],
+                    in_checks: vec![false; batch_size],
+                    leaf_sfens: if want_leaf_sfens {
+                        vec![[0u8; 32]; batch_size]
+                    } else {
+                        Vec::new()
+                    },
+                    actual_batch: 0,
+                    errors: 0,
+                })
+                .expect("initial slot send must succeed");
         }
 
-        let actual_batch = batch_records.len();
-        if actual_batch == 0 {
-            break;
-        }
+        // ---- producer: ストリーム読み込み + 並列特徴量構築 ----
+        let producer = scope.spawn(move || -> Result<(u128, u128)> {
+            let mut reader = reader;
+            let mut remaining = remaining;
+            let mut buffer = [0u8; PackedSfenValue::SIZE];
+            let (mut t_read, mut t_build) = (0u128, 0u128);
+            loop {
+                // 空き slot を取得。consumer が終了して free 側が切れたら producer も終了。
+                let mut slot = match free_rx.recv() {
+                    Ok(s) => s,
+                    Err(_) => return Ok((t_read, t_build)),
+                };
+                let phase_t = Instant::now();
+                // バッチ分のレコードをストリーム読み込み。
+                // 注: 旧実装は `--skip-in-check` でこの段階で親をドロップしていたが、
+                // expand 機能（ポリシー推論）と独立に動かすため、推論は常に実行し、
+                // 王手フラグだけを記録して rescore 書き出し / expand 書き出しの個別判定に使う。
+                slot.records.clear();
+                let mut errs: u64 = 0;
+                while slot.records.len() < batch_size && remaining > 0 {
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        remaining = 0;
+                        break;
+                    }
+                    remaining -= 1;
+                    match reader.read_exact(&mut buffer) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            remaining = 0;
+                            break;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    let psv = match PackedSfenValue::from_bytes(&buffer) {
+                        Some(p) => p,
+                        None => {
+                            errs += 1;
+                            continue;
+                        }
+                    };
+                    let sfen = match unpack_sfen(&psv.sfen) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            errs += 1;
+                            continue;
+                        }
+                    };
+                    slot.records.push((psv, sfen));
+                }
+                let actual_batch = slot.records.len();
+                if phase_timing {
+                    t_read += phase_t.elapsed().as_nanos();
+                }
+                if actual_batch == 0 {
+                    // EOF / 中断: actual_batch=0 を sentinel として送り producer 終了。
+                    slot.actual_batch = 0;
+                    slot.errors = errs;
+                    let _ = ready_tx.send(slot);
+                    return Ok((t_read, t_build));
+                }
 
-        // rayon 並列で特徴量構築
-        f1_buf[..actual_batch * f1_size].fill(0.0);
-        f2_buf[..actual_batch * f2_size].fill(0.0);
+                let phase_t = Instant::now();
+                // rayon 並列で特徴量構築
+                let batch_errors = AtomicU64::new(0);
+                {
+                    let PreparedBatch {
+                        f1,
+                        f2,
+                        records,
+                        stm_flags,
+                        in_checks,
+                        leaf_sfens,
+                        ..
+                    } = &mut slot;
+                    f1[..actual_batch * f1_size].fill(0.0);
+                    f2[..actual_batch * f2_size].fill(0.0);
+                    let f1_slices: Vec<&mut [f32]> =
+                        f1[..actual_batch * f1_size].chunks_mut(f1_size).collect();
+                    let f2_slices: Vec<&mut [f32]> =
+                        f2[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
-        let batch_errors = AtomicU64::new(0);
-        let f1_slices: Vec<&mut [f32]> =
-            f1_buf[..actual_batch * f1_size].chunks_mut(f1_size).collect();
-        let f2_slices: Vec<&mut [f32]> =
-            f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
+                    // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
+                    let stm_flags = &mut stm_flags[..actual_batch];
+                    stm_flags.fill(false);
+                    // root 王手フラグの記録領域も当バッチ分だけ reset（set_sfen 失敗時は false 据え置き）。
+                    let in_checks = &mut in_checks[..actual_batch];
+                    in_checks.fill(false);
+                    // leaf-REPLACEMENT 有効時のみ葉局面の packed sfen を書き込む領域を当バッチ分に絞る。
+                    // 非有効時は空スライス（pack を行わないため zip しない）。
+                    let leaf_sfens_slice: &mut [[u8; 32]] = if want_leaf_sfens {
+                        &mut leaf_sfens[..actual_batch]
+                    } else {
+                        &mut []
+                    };
 
-        // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
-        let stm_flags = &mut stm_flags[..actual_batch];
-        stm_flags.fill(false);
-        // leaf-REPLACEMENT 有効時のみ葉局面の packed sfen を書き込む領域を当バッチ分に絞る。
-        // 非有効時は空スライス（pack を行わないため zip しない）。
-        let leaf_sfens_slice: &mut [[u8; 32]] = if replacement_output.is_some() {
-            &mut leaf_sfens[..actual_batch]
-        } else {
-            &mut []
-        };
-
-        // 1 局面分の特徴量構築（必要なら葉まで進めて葉 sfen を packed_leaf に書く）。
-        let build_one = |f1: &mut [f32],
+                    // 1 局面分の特徴量構築（必要なら葉まで進めて葉 sfen を packed_leaf に書く）。
+                    let build_one =
+                        |f1: &mut [f32],
                          f2: &mut [f32],
                          psv: &PackedSfenValue,
                          sfen: &str,
                          stm_flag: &mut bool,
+                         in_check_slot: &mut bool,
                          packed_leaf: Option<&mut [u8; 32]>| {
-            let mut pos = Position::new();
-            if pos.set_sfen(sfen).is_err() {
-                batch_errors.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
-            // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
-            if qsearch_leaf_label && !pos.in_check() {
-                thread_local! {
-                    static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
-                }
-                NNUE_STACKS.with(|stacks| {
-                    let mut stacks = stacks.borrow_mut();
-                    stacks.reset();
-                    let result = qsearch_with_pv_nnue(
-                        &mut pos,
-                        &mut stacks,
-                        QSEARCH_ALPHA_INIT,
-                        QSEARCH_BETA_INIT,
-                        0,
-                        qsearch_max_ply,
-                    );
-                    *stm_flag = apply_pv(&mut pos, &result.pv);
-                });
-            }
-            // 葉まで進めた pos を pack（王手 root は原局面のまま）。replacement arm 用。
-            if let Some(slot) = packed_leaf {
-                *slot = pack_position(&pos);
-            }
-            build_features(&pos, f1, f2, psv);
-        };
+                            let mut pos = Position::new();
+                            if pos.set_sfen(sfen).is_err() {
+                                batch_errors.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                            // 王手フラグは直列 read の probe ではなくここで求める（同じ set_sfen 後の
+                            // root 局面から 1 回だけ）。書き出し時の skip_in_check / expand 判定に使う。
+                            let root_in_check = pos.in_check();
+                            *in_check_slot = root_in_check;
+                            // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
+                            // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
+                            if qsearch_leaf_label && !root_in_check {
+                                thread_local! {
+                                    static NNUE_STACKS: RefCell<NnueStacks> =
+                                        RefCell::new(NnueStacks::new());
+                                }
+                                NNUE_STACKS.with(|stacks| {
+                                    let mut stacks = stacks.borrow_mut();
+                                    stacks.reset();
+                                    let result = qsearch_with_pv_nnue(
+                                        &mut pos,
+                                        &mut stacks,
+                                        QSEARCH_ALPHA_INIT,
+                                        QSEARCH_BETA_INIT,
+                                        0,
+                                        qsearch_max_ply,
+                                    );
+                                    *stm_flag = apply_pv(&mut pos, &result.pv);
+                                });
+                            }
+                            // 葉まで進めた pos を pack（王手 root は原局面のまま）。replacement arm 用。
+                            if let Some(slot) = packed_leaf {
+                                *slot = pack_position(&pos);
+                            }
+                            build_features(&pos, f1, f2, psv);
+                        };
 
-        if replacement_output.is_some() {
-            f1_slices
-                .into_par_iter()
-                .zip(f2_slices)
-                .zip(batch_records.par_iter())
-                .zip(stm_flags.par_iter_mut())
-                .zip(leaf_sfens_slice.par_iter_mut())
-                .for_each(|((((f1, f2), (psv, sfen, _in_check)), stm_flag), leaf)| {
-                    build_one(f1, f2, psv, sfen, stm_flag, Some(leaf));
-                });
-        } else {
-            f1_slices
-                .into_par_iter()
-                .zip(f2_slices)
-                .zip(batch_records.par_iter())
-                .zip(stm_flags.par_iter_mut())
-                .for_each(|(((f1, f2), (psv, sfen, _in_check)), stm_flag)| {
-                    build_one(f1, f2, psv, sfen, stm_flag, None);
-                });
-        }
-
-        error_count += batch_errors.load(Ordering::Relaxed);
-
-        // IoBinding で推論（Python の run_with_iobinding に対応）
-        // session.run() より ORT 内部のメモリ管理が効率的
-        //
-        // 最適化検証で得られた知見:
-        // - create_binding() のループ外化（再利用）は逆効果（4.6〜36% 悪化）。
-        //   rebind 時に ORT 内部で前回バインドのクリーンアップコストが発生するため、
-        //   毎回新規作成の方が速い。
-        // - output_policy のバインド省略も逆効果（10% 悪化）。
-        //   ORT が未バインド出力の処理にオーバーヘッドを生じる。
-        // - ボトルネックは cudaMemcpyAsync（CPU→GPU 転送）で全体の 96.1%（nsys 計測）。
-        //   転送量削減（FP16 化等）以外での大幅改善は困難。
-        let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
-        let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
-            .map_err(onnx_ort_err)?;
-
-        let shape2: [usize; 4] = [actual_batch, input2_channels, 9, 9];
-        let input2 = TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * f2_size]))
-            .map_err(onnx_ort_err)?;
-
-        let mut binding = session.create_binding().map_err(onnx_ort_err)?;
-        binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
-        binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
-        // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
-        // オーバーヘッドが増加するため全出力をバインドする
-        binding
-            .bind_output_to_device("output_policy", &output_mem)
-            .map_err(onnx_ort_err)?;
-        binding
-            .bind_output_to_device("output_value", &output_mem)
-            .map_err(onnx_ort_err)?;
-
-        let outputs = session.run_binding(&binding).map_err(onnx_ort_err)?;
-
-        let (_, values) =
-            outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
-
-        // rescore 書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
-        // skip_in_check が真かつ親が王手の場合は書き出しを抑制（推論結果は破棄）。
-        for (i, (psv, _sfen, in_check)) in batch_records.iter().enumerate() {
-            if skip_in_check && *in_check {
-                skipped_count += 1;
-                continue;
-            }
-            let winrate = values[i];
-            let clamped = winrate.clamp(0.001, 0.999);
-            let logit = (clamped / (1.0 - clamped)).ln();
-            // qsearch-leaf-label モードで葉の STM が root と異なる場合、推論値は葉の
-            // 手番視点なので root 視点へ符号反転する。
-            let leaf_score = logit * eval_scale;
-            let signed_score = if stm_flags[i] {
-                -leaf_score
-            } else {
-                leaf_score
-            };
-            let raw_score = signed_score as i32;
-            let clipped = raw_score.abs() > score_clip as i32;
-            let new_score = raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16;
-            if clipped {
-                clipped_count += 1;
-            }
-            // leaf-LABEL arm: 出力 sfen は常に root の `psv.sfen`（局面は置換しない）。
-            // 葉評価はラベルのみに反映（符号反転は signed_score に適用済み）。
-            let new_psv = PackedSfenValue {
-                sfen: psv.sfen,
-                score: new_score,
-                move16: 0,
-                game_ply: psv.game_ply,
-                game_result: psv.game_result,
-                padding: 0,
-            };
-            writer.write_all(&new_psv.to_bytes())?;
-
-            // leaf-REPLACEMENT arm（有効時のみ、leaf-LABEL と 1:1 lockstep）。
-            // `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致させる:
-            // - sfen は葉局面の packed sfen
-            // - score は葉評価（符号反転なし＝葉手番視点）に clip 適用
-            // - game_result は STM 反転時のみ符号反転
-            if let Some(rw) = replacement_writer.as_mut() {
-                let leaf_raw = leaf_score as i32;
-                let leaf_clipped_score =
-                    leaf_raw.clamp(-(score_clip as i32), score_clip as i32) as i16;
-                let leaf_game_result = if stm_flags[i] {
-                    -psv.game_result
-                } else {
-                    psv.game_result
-                };
-                let replacement_psv = PackedSfenValue {
-                    sfen: leaf_sfens[i],
-                    score: leaf_clipped_score,
-                    move16: 0,
-                    game_ply: psv.game_ply,
-                    game_result: leaf_game_result,
-                    padding: 0,
-                };
-                rw.write_all(&replacement_psv.to_bytes())?;
-            }
-        }
-
-        // expand 機能（policy ベースの子局面生成）
-        if let (Some(expand_cfg), Some(ew)) = (expand, expand_writer.as_mut()) {
-            let (policy_shape, policy_data) =
-                outputs["output_policy"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
-            let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
-            if policy_data.len() != expected_len {
-                anyhow::bail!(
-                    "Policy output shape mismatch: expected [{actual_batch}, \
-                     {MAX_MOVE_LABEL_NUM}] ({expected_len} elements), got shape {:?} \
-                     ({} elements). Is the ONNX model a compatible policy network?",
-                    policy_shape,
-                    policy_data.len()
-                );
-            }
-
-            for (i, (psv, sfen, parent_in_check)) in batch_records.iter().enumerate() {
-                if expand_cfg.skip_parent_in_check && *parent_in_check {
-                    continue;
-                }
-
-                let mut pos = Position::new();
-                if pos.set_sfen(sfen).is_err() {
-                    continue;
-                }
-                let color = pos.side_to_move();
-
-                let mut list = MoveList::new();
-                generate_legal(&pos, &mut list);
-                if list.is_empty() {
-                    continue;
-                }
-
-                let policy_row = &policy_data[i * MAX_MOVE_LABEL_NUM..(i + 1) * MAX_MOVE_LABEL_NUM];
-
-                logits_buf.clear();
-                for mv in list.iter() {
-                    let label = make_move_label(*mv, color);
-                    logits_buf.push(policy_row[label]);
-                }
-                probs_buf.resize(logits_buf.len(), 0.0);
-                softmax_normalize(&logits_buf, &mut probs_buf);
-
-                for (j, mv) in list.iter().enumerate() {
-                    if probs_buf[j] > expand_cfg.threshold {
-                        let gives_check = pos.gives_check(*mv);
-                        pos.do_move(*mv, gives_check);
-
-                        let child_in_check = pos.in_check();
-                        if !(expand_cfg.skip_child_in_check && child_in_check) {
-                            let packed = pack_position(&pos);
-                            let child = PackedSfenValue {
-                                sfen: packed,
-                                score: 0,
-                                move16: 0,
-                                game_ply: psv.game_ply.saturating_add(1),
-                                game_result: 0,
-                                padding: 0,
-                            };
-                            ew.write_all(&child.to_bytes())?;
-                            total_expanded += 1;
-                        }
-
-                        pos.undo_move(*mv);
+                    if want_leaf_sfens {
+                        f1_slices
+                            .into_par_iter()
+                            .zip(f2_slices)
+                            .zip(records.par_iter())
+                            .zip(stm_flags.par_iter_mut())
+                            .zip(in_checks.par_iter_mut())
+                            .zip(leaf_sfens_slice.par_iter_mut())
+                            .for_each(|(((((f1, f2), (psv, sfen)), stm_flag), in_check), leaf)| {
+                                build_one(f1, f2, psv, sfen, stm_flag, in_check, Some(leaf));
+                            });
+                    } else {
+                        f1_slices
+                            .into_par_iter()
+                            .zip(f2_slices)
+                            .zip(records.par_iter())
+                            .zip(stm_flags.par_iter_mut())
+                            .zip(in_checks.par_iter_mut())
+                            .for_each(|((((f1, f2), (psv, sfen)), stm_flag), in_check)| {
+                                build_one(f1, f2, psv, sfen, stm_flag, in_check, None);
+                            });
                     }
                 }
+
+                slot.actual_batch = actual_batch;
+                slot.errors = errs + batch_errors.load(Ordering::Relaxed);
+                if phase_timing {
+                    t_build += phase_t.elapsed().as_nanos();
+                }
+                // ready へ送る。consumer 側が終了して受け口が切れたら producer も終了。
+                if ready_tx.send(slot).is_err() {
+                    return Ok((t_read, t_build));
+                }
             }
+        });
+
+        // ---- consumer（主スレッド）: GPU 推論 + 書き出し ----
+        while let Ok(batch) = ready_rx.recv() {
+            if batch.actual_batch == 0 {
+                // producer からの EOF / 中断 sentinel。
+                error_count += batch.errors;
+                break;
+            }
+            let actual_batch = batch.actual_batch;
+            error_count += batch.errors;
+            let mut phase_t = Instant::now();
+            {
+                // IoBinding で推論（Python の run_with_iobinding に対応）
+                // session.run() より ORT 内部のメモリ管理が効率的
+                //
+                // 最適化検証で得られた知見:
+                // - create_binding() のループ外化（再利用）は逆効果（4.6〜36% 悪化）。
+                //   rebind 時に ORT 内部で前回バインドのクリーンアップコストが発生するため、
+                //   毎回新規作成の方が速い。
+                // - output_policy のバインド省略も逆効果（10% 悪化）。
+                //   ORT が未バインド出力の処理にオーバーヘッドを生じる。
+                // - ボトルネックは cudaMemcpyAsync（CPU→GPU 転送）で全体の 96.1%（nsys 計測）。
+                //   転送量削減（FP16 化等）以外での大幅改善は困難。
+                let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
+                let input1 = TensorRef::<f32>::from_array_view((
+                    shape1,
+                    &batch.f1[..actual_batch * f1_size],
+                ))
+                .map_err(onnx_ort_err)?;
+
+                let shape2: [usize; 4] = [actual_batch, input2_channels, 9, 9];
+                let input2 = TensorRef::<f32>::from_array_view((
+                    shape2,
+                    &batch.f2[..actual_batch * f2_size],
+                ))
+                .map_err(onnx_ort_err)?;
+
+                let mut binding = session.create_binding().map_err(onnx_ort_err)?;
+                binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
+                binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
+                // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
+                // オーバーヘッドが増加するため全出力をバインドする
+                binding
+                    .bind_output_to_device("output_policy", &output_mem)
+                    .map_err(onnx_ort_err)?;
+                binding
+                    .bind_output_to_device("output_value", &output_mem)
+                    .map_err(onnx_ort_err)?;
+
+                let outputs = session.run_binding(&binding).map_err(onnx_ort_err)?;
+
+                let (_, values) =
+                    outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
+                if phase_timing {
+                    t_run += phase_t.elapsed().as_nanos();
+                    phase_t = Instant::now();
+                }
+
+                // rescore 書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
+                // skip_in_check が真かつ親が王手の場合は書き出しを抑制（推論結果は破棄）。
+                for (i, (psv, _sfen)) in batch.records.iter().enumerate() {
+                    if skip_in_check && batch.in_checks[i] {
+                        skipped_count += 1;
+                        continue;
+                    }
+                    let winrate = values[i];
+                    let clamped = winrate.clamp(0.001, 0.999);
+                    let logit = (clamped / (1.0 - clamped)).ln();
+                    // qsearch-leaf-label モードで葉の STM が root と異なる場合、推論値は葉の
+                    // 手番視点なので root 視点へ符号反転する。
+                    let leaf_score = logit * eval_scale;
+                    let signed_score = if batch.stm_flags[i] {
+                        -leaf_score
+                    } else {
+                        leaf_score
+                    };
+                    let raw_score = signed_score as i32;
+                    let clipped = raw_score.abs() > score_clip as i32;
+                    let new_score = raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16;
+                    if clipped {
+                        clipped_count += 1;
+                    }
+                    // leaf-LABEL arm: 出力 sfen は常に root の `psv.sfen`（局面は置換しない）。
+                    // 葉評価はラベルのみに反映（符号反転は signed_score に適用済み）。
+                    let new_psv = PackedSfenValue {
+                        sfen: psv.sfen,
+                        score: new_score,
+                        move16: 0,
+                        game_ply: psv.game_ply,
+                        game_result: psv.game_result,
+                        padding: 0,
+                    };
+                    writer.write_all(&new_psv.to_bytes())?;
+
+                    // leaf-REPLACEMENT arm（有効時のみ、leaf-LABEL と 1:1 lockstep）。
+                    // `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致させる:
+                    // - sfen は葉局面の packed sfen
+                    // - score は葉評価（符号反転なし＝葉手番視点）に clip 適用
+                    // - game_result は STM 反転時のみ符号反転
+                    if let Some(rw) = replacement_writer.as_mut() {
+                        let leaf_raw = leaf_score as i32;
+                        let leaf_clipped_score =
+                            leaf_raw.clamp(-(score_clip as i32), score_clip as i32) as i16;
+                        let leaf_game_result = if batch.stm_flags[i] {
+                            -psv.game_result
+                        } else {
+                            psv.game_result
+                        };
+                        let replacement_psv = PackedSfenValue {
+                            sfen: batch.leaf_sfens[i],
+                            score: leaf_clipped_score,
+                            move16: 0,
+                            game_ply: psv.game_ply,
+                            game_result: leaf_game_result,
+                            padding: 0,
+                        };
+                        rw.write_all(&replacement_psv.to_bytes())?;
+                    }
+                }
+
+                // expand 機能（policy ベースの子局面生成）
+                if let (Some(expand_cfg), Some(ew)) = (expand, expand_writer.as_mut()) {
+                    let (policy_shape, policy_data) = outputs["output_policy"]
+                        .try_extract_tensor::<f32>()
+                        .map_err(onnx_ort_err)?;
+                    let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
+                    if policy_data.len() != expected_len {
+                        anyhow::bail!(
+                            "Policy output shape mismatch: expected [{actual_batch}, \
+                             {MAX_MOVE_LABEL_NUM}] ({expected_len} elements), got shape {:?} \
+                             ({} elements). Is the ONNX model a compatible policy network?",
+                            policy_shape,
+                            policy_data.len()
+                        );
+                    }
+
+                    for (i, (psv, sfen)) in batch.records.iter().enumerate() {
+                        if expand_cfg.skip_parent_in_check && batch.in_checks[i] {
+                            continue;
+                        }
+
+                        let mut pos = Position::new();
+                        if pos.set_sfen(sfen).is_err() {
+                            continue;
+                        }
+                        let color = pos.side_to_move();
+
+                        let mut list = MoveList::new();
+                        generate_legal(&pos, &mut list);
+                        if list.is_empty() {
+                            continue;
+                        }
+
+                        let policy_row =
+                            &policy_data[i * MAX_MOVE_LABEL_NUM..(i + 1) * MAX_MOVE_LABEL_NUM];
+
+                        logits_buf.clear();
+                        for mv in list.iter() {
+                            let label = make_move_label(*mv, color);
+                            logits_buf.push(policy_row[label]);
+                        }
+                        probs_buf.resize(logits_buf.len(), 0.0);
+                        softmax_normalize(&logits_buf, &mut probs_buf);
+
+                        for (j, mv) in list.iter().enumerate() {
+                            if probs_buf[j] > expand_cfg.threshold {
+                                let gives_check = pos.gives_check(*mv);
+                                pos.do_move(*mv, gives_check);
+
+                                let child_in_check = pos.in_check();
+                                if !(expand_cfg.skip_child_in_check && child_in_check) {
+                                    let packed = pack_position(&pos);
+                                    let child = PackedSfenValue {
+                                        sfen: packed,
+                                        score: 0,
+                                        move16: 0,
+                                        game_ply: psv.game_ply.saturating_add(1),
+                                        game_result: 0,
+                                        padding: 0,
+                                    };
+                                    ew.write_all(&child.to_bytes())?;
+                                    total_expanded += 1;
+                                }
+
+                                pos.undo_move(*mv);
+                            }
+                        }
+                    }
+                }
+
+                if phase_timing {
+                    t_write += phase_t.elapsed().as_nanos();
+                }
+            }
+
+            total_processed += actual_batch as u64;
+            progress.inc(actual_batch as u64);
+            // slot を再利用に戻す。producer が既に終了していて受け口が切れていても無視。
+            let _ = free_tx.send(batch);
         }
 
-        total_processed += actual_batch as u64;
-        progress.inc(actual_batch as u64);
+        // consumer 終了。free_tx を drop して producer の free_rx.recv() を解除し join。
+        // producer の read エラーはここで `?` 相当で伝播する（join 結果が Err）。
+        drop(free_tx);
+        producer.join().expect("producer thread panicked")
+    })?;
+
+    if phase_timing {
+        let ms = |ns: u128| ns as f64 / 1.0e6;
+        let total = (t_read + t_build + t_run + t_write).max(1) as f64;
+        let pct = |ns: u128| ns as f64 / total * 100.0;
+        eprintln!(
+            "[phase timing] read={:.0}ms ({:.1}%)  build={:.0}ms ({:.1}%)  \
+             run={:.0}ms ({:.1}%)  write={:.0}ms ({:.1}%)",
+            ms(t_read),
+            pct(t_read),
+            ms(t_build),
+            pct(t_build),
+            ms(t_run),
+            pct(t_run),
+            ms(t_write),
+            pct(t_write)
+        );
     }
 
     if profile_path.is_some() {
