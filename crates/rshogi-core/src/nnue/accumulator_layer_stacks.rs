@@ -623,7 +623,7 @@ impl<const L1: usize> Default for AccumulatorStackLayerStacks<L1> {
 /// LayerStacks アキュムレータスタックの L1 サイズ dispatch enum
 ///
 /// Cargo feature `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
-/// / `layerstacks-768x16x32` / `layerstacks-768x8x32` / `layerstacks-512x16x32` で
+/// / `layerstacks-768x16x32` / `layerstacks-768x8x32` / `layerstacks-512x16x32` / `layerstacks-1024x16x32` で
 /// 有効なバリアントが制御される。
 pub enum LayerStacksAccStack {
     #[cfg(feature = "layerstacks-1536x16x32")]
@@ -636,6 +636,8 @@ pub enum LayerStacksAccStack {
     L768x8x32(AccumulatorStackLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(AccumulatorStackLayerStacks<512>),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x16x32(AccumulatorStackLayerStacks<1024>),
 }
 
 /// LayerStacks dispatch match の網羅性を確保するマクロ
@@ -655,12 +657,15 @@ macro_rules! ls_match {
             Self::L768x8x32($pat) => $body,
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32($pat) => $body,
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32($pat) => $body,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -681,12 +686,15 @@ impl LayerStacksAccStack {
             Self::L768x8x32(_) => 768,
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32(_) => 512,
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32(_) => 1024,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -705,12 +713,15 @@ impl LayerStacksAccStack {
             Self::L768x8x32(_) => (768, 8, 32),
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32(_) => (512, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32(_) => (1024, 16, 32),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -758,6 +769,8 @@ pub enum LayerStacksAccCache {
     L768x8x32(AccumulatorCacheLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(AccumulatorCacheLayerStacks<512>),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x16x32(AccumulatorCacheLayerStacks<1024>),
 }
 
 impl LayerStacksAccCache {
@@ -778,12 +791,15 @@ impl LayerStacksAccCache {
             Self::L768x8x32(_) => 768,
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32(_) => 512,
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32(_) => 1024,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -802,12 +818,15 @@ impl LayerStacksAccCache {
             Self::L768x8x32(_) => (768, 8, 32),
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32(_) => (512, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32(_) => (1024, 16, 32),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -826,12 +845,15 @@ impl LayerStacksAccCache {
             Self::L768x8x32(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-512x16x32")]
             Self::L512x16x32(c) => c.invalidate(),
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x16x32(c) => c.invalidate(),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768x16x32",
                 feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32"
+                feature = "layerstacks-512x16x32",
+                feature = "layerstacks-1024x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }

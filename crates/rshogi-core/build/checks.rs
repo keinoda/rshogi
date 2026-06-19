@@ -42,6 +42,7 @@ fn validate_feature_combination(
         "layerstacks-768x16x32",
         "layerstacks-768x8x32",
         "layerstacks-512x16x32",
+        "layerstacks-1024x16x32",
     ];
     let layerstacks_count = layerstacks_features
         .iter()

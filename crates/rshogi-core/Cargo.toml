@@ -98,6 +98,7 @@ layerstacks-1536x32x32 = []
 layerstacks-768x16x32  = []
 layerstacks-768x8x32   = []
 layerstacks-512x16x32  = []
+layerstacks-1024x16x32 = []
 
 # LayerStack 拡張 slot (psqt / threat)
 # - nnue-psqt:   AccumulatorLayerStacks に psqt_accumulation を含める。PSQT モデル読み込み可。
@@ -146,7 +147,7 @@ edition-universal = [
   "mode-universal",
   "layerstack-arch", "halfkx-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32",
+  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32",
   "nnue-psqt", "nnue-threat",
   "halfkx-activation-crelu", "halfkx-activation-screlu", "halfkx-activation-pairwise",
 ]
@@ -164,7 +165,7 @@ edition-layerstacks             = ["edition-layerstacks-any-any-any"]
 edition-layerstacks-any-any-any = [
   "mode-family", "layerstack-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32",
+  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32",
   "nnue-psqt", "nnue-threat",
 ]
 
@@ -210,7 +211,10 @@ edition-layerstacks-halfka_hm_merged-1536x32x32-none = [
   "nnue-progress-diff",
 ]
 
-# LayerStack specific (768x16x32 / 768x8x32 / 512x16x32、none のみ)。L0=768/512 系は progress-diff 不可。
+# LayerStack specific (1024x16x32 / 768x16x32 / 768x8x32 / 512x16x32、none のみ)。L0≠1536 系は progress-diff 不可。
+edition-layerstacks-halfka_hm_merged-1024x16x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32",
+]
 edition-layerstacks-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",
 ]
