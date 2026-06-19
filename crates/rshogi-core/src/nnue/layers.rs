@@ -292,6 +292,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// スクランブル後のインデックスを返す
     #[inline]
     const fn get_weight_index_scrambled(i: usize) -> usize {
+        // i = output * PADDED_INPUT + input
+        // output = i / PADDED_INPUT, input = i % PADDED_INPUT
+        // input_chunk = input / CHUNK_SIZE, byte_in_chunk = input % CHUNK_SIZE
         // 変換後: input_chunk * OUTPUT_DIM * CHUNK_SIZE + output * CHUNK_SIZE + byte_in_chunk
         (i / Self::CHUNK_SIZE) % Self::NUM_INPUT_CHUNKS * OUTPUT_DIM * Self::CHUNK_SIZE
             + i / Self::PADDED_INPUT * Self::CHUNK_SIZE
