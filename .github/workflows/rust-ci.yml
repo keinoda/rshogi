@@ -44,7 +44,6 @@ jobs:
             rust_code:
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - 'build.rs'
               - 'crates/**'
               - '.cargo/**'
               - '.github/workflows/rust-ci.yml'
