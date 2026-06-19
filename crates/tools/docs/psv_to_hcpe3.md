@@ -16,7 +16,10 @@ policy target は best move の one-hot、value は PSV の評価値から取り
 ## 出力形式
 
 局面の盤面は cshogi `Board.to_hcp` 互換の HuffmanCodedPos（32 バイト）で表現します。
-指し手は cshogi の move16（`move16_from_psv` 相当）、勝敗は手番側視点 ±1/0 を
+指し手は hcpe 形式の move16 へ変換します。YaneuraOu PSV の move16 は
+**bit14=駒打ちフラグ（from フィールド=駒種, 歩=1..飛=7）・bit15=成りフラグ**で、
+これを hcpe 形式（駒打ち `from = 81 + (駒種 - 1)`、成り `bit14`）へ意味的に復号します
+（参照実装 cshogi `move16_from_psv` と一致）。勝敗は手番側視点 ±1/0 を
 `0:DRAW / 1:BLACK_WIN / 2:WHITE_WIN` に変換します。
 
 ### hcpe3（既定, 46 バイト/レコード）

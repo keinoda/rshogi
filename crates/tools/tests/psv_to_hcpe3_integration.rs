@@ -53,6 +53,34 @@ fn hcpe_matches_cshogi_oracle() {
     assert_eq!(got, expected, "hcpe output must byte-match the cshogi oracle");
 }
 
+// 実 YaneuraOu PSV 形式（成り=bit15 / 駒打ち=bit14+from=駒種）の move16 を含む fixture。
+// 旧 0x1800 減算方式は bit15 の成りを誤変換するため、この fixture は回帰ガードになる。
+#[test]
+fn hcpe3_matches_cshogi_oracle_yaneuraou_format() {
+    let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
+    let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe3")).unwrap();
+    let out = std::env::temp_dir().join("psv_to_hcpe3_it_yo_hcpe3.bin");
+    run(&input, &out, "hcpe3", "1", "200000");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        expected,
+        "real-YaneuraOu PSV (bit15 promote / bit14 drop) must byte-match the cshogi oracle"
+    );
+}
+
+#[test]
+fn hcpe_matches_cshogi_oracle_yaneuraou_format() {
+    let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
+    let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe")).unwrap();
+    let out = std::env::temp_dir().join("psv_to_hcpe3_it_yo_hcpe.bin");
+    run(&input, &out, "hcpe", "1", "200000");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        expected,
+        "real-YaneuraOu PSV hcpe output must byte-match the cshogi oracle"
+    );
+}
+
 #[test]
 fn trailing_partial_bytes_are_ignored() {
     // 末尾にレコード長未満の半端バイトがあっても、完全なレコードの出力は ground truth と一致し、
