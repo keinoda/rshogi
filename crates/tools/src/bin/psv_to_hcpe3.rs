@@ -116,17 +116,23 @@ fn game_result_byte(game_result: i8, side_to_move: Color) -> u8 {
     }
 }
 
-/// PSV の YaneuraOu move16 を hcpe / hcpe3 が要求する move16 へ変換する。
+/// YaneuraOu PSV の move16 を hcpe / hcpe3 が要求する move16 へ意味的に復号する。
 ///
-/// 盤上マス番号・駒打ち表現（`from = 81 + 駒種`）は YaneuraOu と同一で、成り（bit14）
-/// だけ 0x1800 ずれる。bit15 を含めない全有効入力で、形式の参照実装である cshogi
+/// YaneuraOu PSV の move16 は bit14=駒打ちフラグ（from フィールド=駒種, 歩=1..飛=7）、
+/// bit15=成りフラグ。hcpe 形式は駒打ちを `from = 81 + (駒種 - 1)` で表し、成りを bit14 で
+/// 表すため、両フラグを見て変換する。実 YaneuraOu の手で形式の参照実装 cshogi
 /// `move16_from_psv` と一致することを確認済み。
 #[inline]
 fn move16_psv_to_hcpe(yo_move16: u16) -> u16 {
+    let to = yo_move16 & 0x7f;
+    let from_field = (yo_move16 >> 7) & 0x7f;
     if yo_move16 & 0x4000 != 0 {
-        yo_move16.wrapping_sub(0x1800)
+        // 駒打ち: from フィールドは駒種(1 始まり) → from = 81 + (駒種 - 1) = 80 + from_field
+        to | ((80 + from_field) << 7)
     } else {
-        yo_move16
+        // 盤上の手: 成りは YaneuraOu の bit15 → hcpe の bit14 へ移す
+        let promote = if yo_move16 & 0x8000 != 0 { 0x4000 } else { 0 };
+        to | (from_field << 7) | promote
     }
 }
 
@@ -403,11 +409,12 @@ mod tests {
 
     #[test]
     fn move16_psv_to_hcpe_matches_oracle() {
-        // none / 通常手 / 駒打ちは無変換、成りのみ 0x1800 ずれる（cshogi move16_from_psv 準拠）。
+        // 実 YaneuraOu PSV move16（bit14=駒打ち, bit15=成り）を hcpe 形式へ。
+        // 期待値は cshogi `move16_from_psv` で生成（参照実装）。
         assert_eq!(move16_psv_to_hcpe(0x0000), 0x0000); // none
-        assert_eq!(move16_psv_to_hcpe(0x162b), 0x162b); // 通常手
-        assert_eq!(move16_psv_to_hcpe(0x2917), 0x2917); // 歩打ち（from=82=81+1）
-        assert_eq!(move16_psv_to_hcpe(0x4b2a), 0x332a); // 成り
-        assert_eq!(move16_psv_to_hcpe(0x62bb), 0x4abb); // 成り
+        assert_eq!(move16_psv_to_hcpe(0x078e), 0x078e); // 通常手 2g2f
+        assert_eq!(move16_psv_to_hcpe(0x40a5), 0x28a5); // 歩打ち P*5b（bit14, from=1）
+        assert_eq!(move16_psv_to_hcpe(0x4380), 0x2b80); // 金打ち G*1a（bit14, from=7）
+        assert_eq!(move16_psv_to_hcpe(0x9f46), 0x5f46); // 成り 7i8h+（bit15 → hcpe bit14）
     }
 }
