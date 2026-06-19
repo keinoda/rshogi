@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # GitHub Actions は commit SHA で pin 運用しているため、pin の陳腐化
+  # （action 側のセキュリティ修正の取りこぼし）を防ぐべく Dependabot で
+  # SHA 更新を週次で自動提案する。全 action の更新は 1 件にまとめる。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

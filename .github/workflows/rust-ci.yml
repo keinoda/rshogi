@@ -184,7 +184,7 @@ jobs:
         with:
           toolchain: stable
       - name: Add wasm32 target to pinned toolchain
-        # `rust-toolchain.toml` が channel を 1.93.1 に pin しているため、
+        # `rust-toolchain.toml` が channel を pin しているため、
         # cargo は dtolnay/rust-toolchain が install した stable では
         # なく rust-toolchain.toml の channel を使う（`rustup show active-toolchain` で
         # 確認できる）。dtolnay action の `targets:` パラメータは default toolchain
