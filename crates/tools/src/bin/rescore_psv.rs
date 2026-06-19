@@ -57,7 +57,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
 
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
@@ -2667,6 +2666,7 @@ where
     use ort::session::Session;
     use ort::value::TensorRef;
     use rshogi_core::movegen::{MoveList, generate_legal};
+    use std::time::Instant;
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
 
     /// 合法手のロジットを softmax 正規化して `out` に書き込む
@@ -2948,8 +2948,9 @@ where
     // 王手 probe を build へ移したこととあわせ、GPU が CPU 前処理を待つアイドルを潰す。
     // - producer: ストリーム読み込み（直列 I/O）+ rayon 並列特徴量構築
     // - consumer（主スレッド）: ORT セッションで推論し結果を書き出し
-    // 決定性: from_bytes/unpack を直列段階に残しバッチ構成を不変に保つため、出力は逐次実装と
-    // bit 一致。slot は free/ready の 2 本のチャネルで循環し、同時生存は PIPELINE_SLOTS 個。
+    // 決定性: from_bytes/unpack を直列段階に残しバッチ構成を不変に保つため、出力はオーバーラップ
+    // 前の直列ループ実装と bit 一致。slot は free/ready の 2 本のチャネルで循環し、同時生存は
+    // PIPELINE_SLOTS 個。
     const PIPELINE_SLOTS: usize = 2;
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
         let (free_tx, free_rx) = mpsc::channel::<PreparedBatch>();
@@ -3352,6 +3353,8 @@ where
 
         // consumer 終了。free_tx を drop して producer の free_rx.recv() を解除し join。
         // producer の read エラーはここで `?` 相当で伝播する（join 結果が Err）。
+        // consumer が途中の `?` で早期 return した場合も、scope クロージャの unwind で
+        // free_tx が drop され producer の recv が解除されるためデッドロックしない。
         drop(free_tx);
         producer.join().expect("producer thread panicked")
     })?;
