@@ -204,6 +204,78 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  simd-runtime:
+    # NNUE の SIMD propagate 経路 (AVX2 / AVX-512 / AVX-512VNNI) を Intel SDE で
+    # エミュレート実行し、各経路の数値正しさを検証する。
+    #
+    # なぜ SDE か:
+    #   GitHub-hosted runner の CPU 世代は不定で AVX-512 を持つ保証がなく、
+    #   workflow 上位の `target-cpu=x86-64-v2` baseline も「別 CPU でビルドした
+    #   キャッシュを別 runner で実行して SIGILL する」flaky を避けるための保守設定。
+    #   結果として既存 job は SSSE3 経路しか実行検証していない。SDE は任意 ISA を
+    #   任意 host でエミュレート実行できるため、専用ハード無しで本番相当の経路を
+    #   決定的に検証できる。target-cpu とエミュレートする chip を対にして、各 cfg 経路
+    #   (AVX-512 は VNNI 有無で別実装) を個別に通す。
+    #
+    # RUSTFLAGS の扱い:
+    #   build script / proc-macro は host で実行されるため、高 ISA 命令を出すと runner で
+    #   SIGILL する。`--target x86_64-unknown-linux-gnu` を明示してターゲット成果物のみ
+    #   `CARGO_TARGET_<triple>_RUSTFLAGS` で高 ISA 化する (build-deps は host 既定フラグの
+    #   まま)。cargo の rustflags は単一ソースのみ採用し、`RUSTFLAGS` が set (空文字含む)
+    #   だと `CARGO_TARGET_<triple>_RUSTFLAGS` が無視されるため、step 内で `RUSTFLAGS` を
+    #   unset してから cargo を呼ぶ。
+    name: SIMD runtime (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
+    # SDE エミュレーションは遅いが対象は rshogi-core の単体テストのみで短時間。余裕を見た上限。
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: avx2
+            cpu: haswell
+            chip: hsw
+          - label: avx512
+            cpu: skylake-avx512
+            chip: skx
+          - label: avx512vnni
+            cpu: icelake-server
+            chip: icx
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # mold linker は .cargo/config.toml で wired されていないため install しない
+      # (rshogi-core のみのリンクで効果が無く runner setup 時間を浪費するだけ)。
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup Intel SDE
+        uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        with:
+          sdeVersion: 10.8.0
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          # host baseline (`lint` / `test`) や wasm32 とキャッシュ namespace を分離する。
+          # target-cpu を明示するため成果物は CPU 非依存で、別 runner 実行でも SIGILL しない。
+          shared-key: simd-${{ matrix.label }}
+      - name: Build & run rshogi-core tests under SDE
+        run: |
+          set -euo pipefail
+          # SDE バイナリ配置を先に検証し、レイアウト相違時に原因を即特定する。
+          test -x "$SDE_PATH/sde64" || { echo "sde64 not found under SDE_PATH=$SDE_PATH"; ls -la "$SDE_PATH" || true; exit 1; }
+          # RUSTFLAGS が set だと CARGO_TARGET_<triple>_RUSTFLAGS が無視されるため unset。
+          unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=${{ matrix.cpu }}"
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$SDE_PATH/sde64 -${{ matrix.chip }} --"
+          cargo test -p rshogi-core --lib --target x86_64-unknown-linux-gnu -- --test-threads=2
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   abs-paths:
     # tracked file に machine 依存の絶対パスが混入していないか検査する
     # (検出対象の具体は scripts/check-tracked-abs-paths.sh を参照)。docs / skills を
