@@ -3738,7 +3738,12 @@ where
     let rescore_written = total_processed.saturating_sub(skipped_count);
     let total = total_processed + error_count;
     if error_count > 0 {
-        eprintln!("Note: {error_count} positions had errors");
+        // 破損/パース不能でスキップしたレコードは推論バッチに入らず進捗に計上されないため、
+        // それらがあると進捗表示が 100% に届かないことがある（rescore 出力は有効分のみで正常）。
+        eprintln!(
+            "Note: {error_count} 件のレコードでエラー（破損 / パース不能）。スキップ分は \
+             進捗に計上されないため、進捗表示が 100% に届かないことがある（rescore 出力は正常）。"
+        );
     }
     if skipped_count > 0 && total > 0 {
         eprintln!(
