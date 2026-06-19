@@ -657,6 +657,36 @@ fn with_progress_keys(style: ProgressStyle) -> ProgressStyle {
         })
 }
 
+#[cfg(test)]
+mod progress_format_tests {
+    use super::{Duration, compact_count, compact_rate, fmt_hms};
+
+    #[test]
+    fn compact_count_thresholds() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1_000), "1.0k");
+        assert_eq!(compact_count(523_456), "523.5k");
+        assert_eq!(compact_count(1_000_000), "1.00M");
+        assert_eq!(compact_count(3_840_000), "3.84M");
+    }
+
+    #[test]
+    fn compact_rate_thresholds() {
+        assert_eq!(compact_rate(500.0), "500");
+        assert_eq!(compact_rate(8338.0), "8.3k");
+        assert_eq!(compact_rate(1_500_000.0), "1.50M");
+    }
+
+    #[test]
+    fn fmt_hms_minutes_and_hours() {
+        assert_eq!(fmt_hms(Duration::from_secs(0)), "00:00");
+        assert_eq!(fmt_hms(Duration::from_secs(90)), "01:30");
+        assert_eq!(fmt_hms(Duration::from_secs(600)), "10:00");
+        assert_eq!(fmt_hms(Duration::from_secs(3661)), "1:01:01");
+    }
+}
+
 /// 非TTY 時に定期ログ行を間引くための状態。
 struct LogThrottle {
     last: Option<Instant>,
