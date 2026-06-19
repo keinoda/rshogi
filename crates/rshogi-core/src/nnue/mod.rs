@@ -116,6 +116,8 @@ pub use network_layer_stacks::NetworkLayerStacks512x16x32;
 pub use network_layer_stacks::NetworkLayerStacks768x8x32;
 #[cfg(all(feature = "layerstacks-768x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks768x16x32;
+#[cfg(all(feature = "layerstacks-1024x16x32", feature = "ft-halfka_hm_merged"))]
+pub use network_layer_stacks::NetworkLayerStacks1024x16x32;
 #[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x16x32;
 #[cfg(all(feature = "layerstacks-1536x32x32", feature = "ft-halfka_hm_merged"))]

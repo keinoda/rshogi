@@ -701,7 +701,8 @@ mod tests {
             feature = "layerstacks-1536x32x32",
             feature = "layerstacks-768x16x32",
             feature = "layerstacks-768x8x32",
-            feature = "layerstacks-512x16x32"
+            feature = "layerstacks-512x16x32",
+            feature = "layerstacks-1024x16x32"
         ))]
         {
             use crate::nnue::accumulator_layer_stacks::{
@@ -760,6 +761,18 @@ mod tests {
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L512x16x32(AccumulatorStackLayerStacks::<512>::new()),
+                );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L1024x16x32(AccumulatorStackLayerStacks::<1024>::new()),
                 );
                 stack.reset();
                 stack.push(dirty);
