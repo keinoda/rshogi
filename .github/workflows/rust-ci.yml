@@ -6,6 +6,7 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.cargo/**'
       - '.github/workflows/rust-ci.yml'
   pull_request:
   workflow_dispatch:
@@ -46,6 +47,7 @@ jobs:
               - 'build.rs'
               - 'crates/**'
               - '.cargo/**'
+              - '.github/workflows/rust-ci.yml'
               - '!docs/**'
               - '!runs/**'
               - '!logs/**'
