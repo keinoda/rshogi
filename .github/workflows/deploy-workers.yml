@@ -130,7 +130,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::staging deploy skipped (environment secrets not configured)."
           fi
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         if: steps.check.outputs.can_deploy == 'true'
         with:
           # https://github.com/SH11235/rshogi/issues/639: drift detection の基準値となる DEPLOY_TRIGGER_SHA を
@@ -187,7 +187,7 @@ jobs:
       - name: Install worker-build
         if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      - uses: pnpm/action-setup@91ab88e2619ed1f46221f0ba42d1492c02baf788 # v6.0.6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
@@ -228,7 +228,7 @@ jobs:
           echo "DEPLOY_TRIGGER_SHA=$sha"
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
-        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -326,7 +326,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::FORCE DEPLOY: drain bypassed. reason=$FORCE_DEPLOY_REASON"
           fi
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         if: steps.check.outputs.can_deploy == 'true'
         with:
           # https://github.com/SH11235/rshogi/issues/639: 同 staging job の checkout コメント参照。drift detection 用
@@ -404,7 +404,7 @@ jobs:
       - name: Install worker-build
         if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      - uses: pnpm/action-setup@91ab88e2619ed1f46221f0ba42d1492c02baf788 # v6.0.6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
@@ -440,7 +440,7 @@ jobs:
           echo "DEPLOY_TRIGGER_SHA=$sha"
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
-        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
