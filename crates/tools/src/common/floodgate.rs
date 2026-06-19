@@ -84,7 +84,8 @@ fn extract_csa_rel_path(line: &str) -> Option<String> {
             // 絶対パスは末尾の "/x/" 以降を相対パスとして返す。floodgate サーバの
             // www root は変わりうる (例: /home/shogi-server/www/x/ →
             // /home/shogi/work/x/) ため prefix をハードコードせず "/x/" を anchor に
-            // して吸収する。"/x/" が無ければ既に YYYY/MM/DD/... 相対形式とみなす。
+            // して吸収する。rfind で末尾側の "/x/" を採るので、先行パスに偶発的な
+            // "/x/" があっても影響されない。"/x/" が無ければ既に相対形式とみなす。
             if let Some(pos) = path.rfind("/x/") {
                 return Some(path[pos + "/x/".len()..].to_string());
             }
@@ -117,7 +118,11 @@ pub fn rating_page_url(root: &str, date_yyyymmdd: &str) -> Result<String> {
 /// 今日から数日遡って最初に取得できたページを採用する。
 pub fn fetch_latest_rating_page(client: &Client) -> Result<(String, String)> {
     const LOOKBACK_DAYS: i64 = 7;
-    let today = chrono::Local::now().date_naive();
+    // ファイル名は floodgate サーバ (JST/+0900) 基準の日付なので、ホスト TZ に依存せず
+    // JST で当日を求める。UTC など JST より遅れた TZ のホストでは現地 today が当日分を
+    // 取りこぼしうるため。
+    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST は有効なオフセット");
+    let today = chrono::Utc::now().with_timezone(&jst).date_naive();
     let mut last_err: Option<anyhow::Error> = None;
     for back in 0..=LOOKBACK_DAYS {
         let date = today - chrono::Duration::days(back);
@@ -127,11 +132,10 @@ pub fn fetch_latest_rating_page(client: &Client) -> Result<(String, String)> {
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err
-        .unwrap_or_else(|| anyhow::anyhow!("no candidate dates"))
-        .context(format!(
-            "直近 {LOOKBACK_DAYS} 日分の Floodgate レーティングページを取得できませんでした"
-        )))
+    // ここに到達するのは全試行が Err だった時のみで、その場合 last_err は必ず Some。
+    Err(last_err.expect("全失敗時のみ到達するため last_err は Some").context(format!(
+        "直近 {LOOKBACK_DAYS} 日分の Floodgate レーティングページを取得できませんでした"
+    )))
 }
 
 /// Floodgate レーティングページ HTML から (プレイヤー名, レーティング) のリストを抽出。
