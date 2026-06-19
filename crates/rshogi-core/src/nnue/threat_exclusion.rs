@@ -20,6 +20,7 @@
 //! | 0  | (default) | なし (Baseline) | 216,720 |
 //! | 1  | `threat-profile-same-class` | 同種ペア全除外 (9 クラス × 4 side = 36 pair) | 192,640 |
 //! | 2  | `threat-profile-same-class-major-pawn` | profile 1 + 大駒 attacker → Pawn attacked (4 大駒 × 4 side = 16 pair 追加) | 173,568 |
+//! | 10 | `threat-profile-cross-side` | 同 side (`as==ds`) と同種 (`ac==dc`) を除外、敵味方跨ぎの異種 pair のみ残す | 96,320 |
 //!
 //! # 設計: pair_base の sentinel
 //!
@@ -75,7 +76,8 @@
 // 相互排他チェック: 複数 profile を同時選択すると compile error
 const _PROFILE_EXCLUSIVITY: () = {
     let count = cfg!(feature = "threat-profile-same-class") as usize
-        + cfg!(feature = "threat-profile-same-class-major-pawn") as usize;
+        + cfg!(feature = "threat-profile-same-class-major-pawn") as usize
+        + cfg!(feature = "threat-profile-cross-side") as usize;
     assert!(count <= 1, "Multiple threat profiles selected. Choose at most one.");
 };
 
@@ -84,7 +86,9 @@ const _PROFILE_EXCLUSIVITY: () = {
 /// quantised.bin に書き込まれる profile 識別子。
 /// engine と model の profile が一致しなければ読み込みエラー。
 pub const THREAT_PROFILE_ID: u32 = {
-    if cfg!(feature = "threat-profile-same-class-major-pawn") {
+    if cfg!(feature = "threat-profile-cross-side") {
+        10
+    } else if cfg!(feature = "threat-profile-same-class-major-pawn") {
         2
     } else if cfg!(feature = "threat-profile-same-class") {
         1
@@ -98,9 +102,9 @@ pub const THREAT_PROFILE_ID: u32 = {
 /// `build_pair_base` (const fn) から呼ばれるため、引数は usize。
 ///
 /// # 引数
-/// - `as_`: attacker side (0=friend, 1=enemy) — 現在未使用 (reserved)
+/// - `as_`: attacker side (0=friend, 1=enemy) — `threat-profile-cross-side` のみ使用
 /// - `ac`: attacker class index (0..8, ThreatClass の discriminant)
-/// - `ds`: attacked side (0=friend, 1=enemy) — 現在未使用 (reserved)
+/// - `ds`: attacked side (0=friend, 1=enemy) — `threat-profile-cross-side` のみ使用
 /// - `dc`: attacked class index (0..8)
 ///
 /// # ThreatClass index
@@ -122,6 +126,11 @@ pub const fn is_excluded(as_: usize, ac: usize, ds: usize, dc: usize) -> bool {
         return true;
     }
 
+    // 同 side ペアと同種ペアを除外し、敵味方跨ぎの異種 pair のみ残す (profile 10)
+    if cfg!(feature = "threat-profile-cross-side") && (as_ == ds || ac == dc) {
+        return true;
+    }
+
     false
 }
 
@@ -134,6 +143,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_PROFILE_ID, 0);
     }
@@ -143,6 +153,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-cross-side",
         )))]
         {
             assert!(!is_excluded(0, 0, 0, 0));
@@ -168,6 +179,19 @@ mod tests {
             assert!(is_excluded(0, 0, 0, 0)); // same-class
             assert!(is_excluded(0, 5, 0, 0)); // Bishop→Pawn
             assert!(!is_excluded(0, 3, 0, 0)); // Silver→Pawn (not major)
+        }
+    }
+
+    #[test]
+    fn test_block_cross_side() {
+        #[cfg(feature = "threat-profile-cross-side")]
+        {
+            assert_eq!(THREAT_PROFILE_ID, 10);
+            assert!(is_excluded(0, 3, 0, 5)); // 同 side (friend→friend) → 除外
+            assert!(is_excluded(1, 3, 1, 5)); // 同 side (enemy→enemy) → 除外
+            assert!(is_excluded(0, 4, 1, 4)); // 同種 (ac==dc) → 除外
+            assert!(!is_excluded(0, 3, 1, 5)); // cross-side 異種 (friend→enemy) → 残す
+            assert!(!is_excluded(1, 5, 0, 3)); // cross-side 異種 (enemy→friend) → 残す
         }
     }
 }

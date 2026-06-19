@@ -78,6 +78,7 @@ search-no-pass-rules = []
 # 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
+threat-profile-cross-side = []               # profile 10: 同 side / 同種を除外、敵味方跨ぎ異種のみ
 
 # === Edition 軸 atomic feature 群 ===
 # 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。

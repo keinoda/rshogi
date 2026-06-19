@@ -144,6 +144,11 @@ feature は 4 カテゴリの組み合わせ:
    / `layerstacks-768x16x32` / `layerstacks-512x16x32`。複数同時指定は cycles +5.5% 退行
 4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (L0=1536 限定、
    L0=768/512 では cache pressure 増加で cycles +2-6% 退行するため指定しない)
+5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
+   `threat-profile-same-class-major-pawn` (id2) / `threat-profile-cross-side` (id10)。
+   除外 pair で次元を削減した変種で、未指定は full (id0)。edition grammar に profile 軸が
+   無いため preset は無く、`nnue-threat` に手動で 1 つ足す。engine と学習 net の profile は
+   一致必須 (不一致は EvalFile load 時に reject)。
 
 最新 feature 名は実コード確認:
 
@@ -162,6 +167,7 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 | 同上 + PSQT | `ls-halfka_hm_merged-1536x16x32-psqt` | `layerstack-only,nnue-psqt,nnue-progress-diff` |
 | 同上 + Threat | `ls-halfka_hm_merged-1536x16x32-threat` | `layerstack-only,nnue-threat,nnue-progress-diff` |
 | 同上 + PSQT + Threat | `ls-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-only,nnue-psqt,nnue-threat,nnue-progress-diff` |
+| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-only,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
 | LayerStack 1536x32x32 (旧 L1=32) | `ls-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-progress-diff` |
 | LayerStack 768x16x32 | `ls-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32` |
 | LayerStack 512x16x32 | `ls-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-512x16x32` |

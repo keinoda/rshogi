@@ -295,10 +295,29 @@ impl<
         // Threat 読み込み（arch_str に "Threat=" があれば）
         #[cfg(feature = "ls-ext-threat")]
         {
-            let has_threat = arch_str.contains("Threat=");
-            if has_threat {
+            // arch_str の `Threat=<dims>` を構造化 parse し compiled THREAT_DIMENSIONS と
+            // 照合。tatara export は profile の dims を必ず書くため、不一致は engine と
+            // model の profile / feature set 不整合を意味する (旧 profile 0 net の
+            // Threat=216720 は engine profile 0 のとき通る)。
+            if arch_str.contains("Threat=") {
+                let model_dims = parse_threat_dims_from_arch(&arch_str).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed Threat= token in arch string: {arch_str}"),
+                    )
+                })?;
+                let engine_dims = super::threat_features::THREAT_DIMENSIONS;
+                if model_dims != engine_dims {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Threat dims mismatch: model={model_dims}, engine={engine_dims}. \
+                             Use a model trained with the matching threat profile / feature set."
+                        ),
+                    ));
+                }
                 // ThreatProfile= が arch_str にあれば profile id を読み込み検証
-                // なければ旧モデル (v91 以前): profile 0 と見なす
+                // なければ旧モデル (profile 0): profile id フィールド無し
                 let has_profile_field = arch_str.contains("ThreatProfile=");
                 if has_profile_field {
                     reader.read_exact(&mut buf4)?;
@@ -1681,6 +1700,16 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
     super::spec::parse_feature_set_from_arch(arch_str).unwrap_or(Fs::LayerStacks)
 }
 
+/// arch_str の `Threat=<dims>` トークンから次元数を取り出す。
+/// `parse_fv_scale_from_arch` と同じ `,` split + strip_prefix 方式。
+#[cfg(feature = "ls-ext-threat")]
+fn parse_threat_dims_from_arch(arch_str: &str) -> Option<usize> {
+    arch_str
+        .split(',')
+        .find_map(|part| part.strip_prefix("Threat="))
+        .and_then(|v| v.parse::<usize>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
@@ -1690,6 +1719,20 @@ mod tests {
     use crate::position::{Position, SFEN_HIRATE};
 
     const TEST_L1: usize = NNUE_PYTORCH_L1;
+
+    #[cfg(feature = "ls-ext-threat")]
+    #[test]
+    fn test_parse_threat_dims_from_arch() {
+        use super::parse_threat_dims_from_arch as parse;
+        assert_eq!(parse("FV_SCALE=16,Threat=216720,"), Some(216720));
+        assert_eq!(parse("Threat=96320,ThreatProfile=10,"), Some(96320));
+        // 末尾カンマ無し (旧 profile 0 形式)
+        assert_eq!(parse("Threat=216720"), Some(216720));
+        // Threat トークン無し
+        assert_eq!(parse("PSQT=1,"), None);
+        // 数値でない
+        assert_eq!(parse("Threat=abc,"), None);
+    }
 
     #[test]
     fn test_network_dimensions() {
