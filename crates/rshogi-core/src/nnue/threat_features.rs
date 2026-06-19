@@ -171,6 +171,7 @@ use std::sync::LazyLock;
 /// Profile 0 (full): 216,720
 /// Profile 1 (same-class): 192,640
 /// Profile 2 (same-class-major-pawn): 173,568
+/// Profile 10 (cross-side): 96,320
 #[cfg(feature = "ls-ext-threat")]
 pub const THREAT_DIMENSIONS: usize = PAIR_DATA.1;
 

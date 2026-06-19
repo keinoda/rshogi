@@ -1701,7 +1701,10 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
 }
 
 /// arch_str の `Threat=<dims>` トークンから次元数を取り出す。
-/// `parse_fv_scale_from_arch` と同じ `,` split + strip_prefix 方式。
+/// `parse_fv_scale_from_arch` と同じトークン分割方針 (`,` split + `strip_prefix`)。
+///
+/// `strip_prefix("Threat=")` は `Threat=` で始まるトークンにのみ一致するため、
+/// 同居しうる `ThreatProfile=` トークン（7 文字目が `P` で `=` でない）には誤マッチしない。
 #[cfg(feature = "ls-ext-threat")]
 fn parse_threat_dims_from_arch(arch_str: &str) -> Option<usize> {
     arch_str
@@ -1726,6 +1729,10 @@ mod tests {
         use super::parse_threat_dims_from_arch as parse;
         assert_eq!(parse("FV_SCALE=16,Threat=216720,"), Some(216720));
         assert_eq!(parse("Threat=96320,ThreatProfile=10,"), Some(96320));
+        // ThreatProfile= が先行しても Threat= に誤マッチしない
+        assert_eq!(parse("ThreatProfile=10,Threat=96320,"), Some(96320));
+        // ThreatProfile= のみで Threat= が無い場合は None
+        assert_eq!(parse("ThreatProfile=10,"), None);
         // 末尾カンマ無し (旧 profile 0 形式)
         assert_eq!(parse("Threat=216720"), Some(216720));
         // Threat トークン無し
