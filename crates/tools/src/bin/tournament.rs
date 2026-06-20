@@ -330,6 +330,12 @@ struct EngineCommandMeta {
     label_white: String,
     usi_options_black: Vec<String>,
     usi_options_white: Vec<String>,
+    /// 解決済みの固定ノード予算（手番別）。`--engine-nodes` / global `--nodes` で
+    /// エンジンに割り当てた値で、None はノード制限なし（時間 or depth で停止）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes_black: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes_white: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -347,6 +353,10 @@ struct EngineMetaEntry {
     label: String,
     path: String,
     usi_options: Vec<String>,
+    /// 解決済みの固定ノード予算。`--engine-nodes` / global `--nodes` でこの index に
+    /// 割り当てた値で、None はノード制限なし（時間 or depth で停止）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +886,8 @@ fn main() -> Result<()> {
     // 時間管理のバリデーション
     let use_byoyomi = cli.byoyomi > 0;
     let use_fischer = cli.btime > 0 || cli.binc > 0;
-    let use_fixed = cli.depth.is_some() || cli.nodes.is_some() || cli.engine_nodes.is_some();
+    // engine_nodes は cli.nodes も織り込んだ解決済み Vec なので、resolve 後の状態で判定する。
+    let use_fixed = cli.depth.is_some() || engine_nodes.iter().any(|n| n.is_some());
     if use_byoyomi && use_fischer {
         bail!("--byoyomi と --btime/--binc は同時に指定できません");
     }
@@ -1030,6 +1041,7 @@ fn main() -> Result<()> {
                     label: engine_labels[i].clone(),
                     path: cli.engines[i].display().to_string(),
                     usi_options: engine_usi_options[i].clone(),
+                    nodes: engine_nodes[i],
                 })
                 .collect(),
             start_positions: start_commands.clone(),
@@ -1169,6 +1181,8 @@ fn main() -> Result<()> {
                     label_white: engine_labels[j].clone(),
                     usi_options_black: engine_usi_options[i].clone(),
                     usi_options_white: engine_usi_options[j].clone(),
+                    nodes_black: engine_nodes[i],
+                    nodes_white: engine_nodes[j],
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
@@ -1943,6 +1957,12 @@ fn resolve_engine_nodes(
             }
             let value: u64 =
                 nodes_str.parse().with_context(|| format!("invalid node count: {nodes_str}"))?;
+            if value == 0 {
+                bail!(
+                    "--engine-nodes: ノード数は 1 以上が必要 (index {idx} に 0 が指定された)。\
+                     `go nodes 0` は USI 仕様上未定義で停止条件にならない"
+                );
+            }
             nodes[idx] = Some(value);
         }
     }
@@ -2267,6 +2287,8 @@ mod tests {
         assert!(resolve_engine_nodes(2, None, Some(&strings(&["0-1000"]))).is_err());
         assert!(resolve_engine_nodes(2, None, Some(&strings(&["x:1000"]))).is_err());
         assert!(resolve_engine_nodes(2, None, Some(&strings(&["0:notanumber"]))).is_err());
+        // ノード数 0 は停止条件にならないため弾く。
+        assert!(resolve_engine_nodes(2, None, Some(&strings(&["0:0"]))).is_err());
     }
 
     #[test]
