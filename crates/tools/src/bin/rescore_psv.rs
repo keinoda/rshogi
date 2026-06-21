@@ -3010,9 +3010,16 @@ impl PinnedPool {
     /// `len` 要素 (f32) 分の pinned バッファを確保しゼロ初期化して返す。
     fn alloc_zeroed(&mut self, len: usize) -> Result<PinnedBuf> {
         let mut block = self.allocator.alloc::<f32>(len).map_err(onnx_ort_err)?;
-        let ptr = block.as_mut_ptr().cast::<f32>();
-        // SAFETY: alloc が len*size_of::<f32>() バイトを確保済み。pinned は CPU からアクセス可。
-        unsafe { std::ptr::write_bytes(ptr, 0, len) };
+        // ゼロ初期化用に block を借用して書き込む（所有権はまだ block 側）。
+        {
+            let zero_ptr = block.as_mut_ptr().cast::<f32>();
+            // SAFETY: alloc が len*size_of::<f32>() バイトを確保済み（pinned は CPU アクセス可）。
+            // write_bytes::<f32>(_, 0, len) は len*size_of::<f32>() = len*4 バイトをゼロ化し、
+            // 確保サイズと一致する。
+            unsafe { std::ptr::write_bytes(zero_ptr, 0, len) };
+        }
+        // 所有権を block から取り出す（以後の free は PinnedPool::drop が担う）。zero_ptr と
+        // 同一アドレスだが、こちらは「移動した所有ポインタ」を表す。
         let ptr = block.into_raw().cast::<f32>();
         self.ptrs.push(ptr);
         Ok(PinnedBuf { ptr, len })
@@ -3387,7 +3394,9 @@ where
     let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
         let mut ok = true;
         for _ in 0..PIPELINE_SLOTS {
-            // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。
+            // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
+            // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
+            // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
             let f1 = pool.alloc_zeroed(batch_size * f1_size);
             let f2 = pool.alloc_zeroed(batch_size * f2_size);
             match (f1, f2) {
