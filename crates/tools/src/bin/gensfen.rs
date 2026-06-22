@@ -617,7 +617,7 @@ impl TrainingDataCollector {
         score_cp: Option<i32>,
         score_mate: Option<i32>,
         best_move: Option<Move>,
-        played_move: Option<Move>,
+        played_move: Move,
         candidates: &[MultiPvCandidate],
     ) {
         let current_ply = pos.game_ply();
@@ -670,7 +670,7 @@ impl TrainingDataCollector {
 
         // hcpe3 形式は replay 整合のため selectedMove16 を実着手にし、各手に MultiPV policy を持たせる
         let hcpe3 = if self.format == TrainingFormat::Hcpe3 {
-            let selected_move16 = played_move.map_or(0, move_to_move16);
+            let selected_move16 = move_to_move16(played_move);
             let eval = score_mate.map_or(score, mate_to_eval);
             let policy = if candidates.is_empty() {
                 vec![(selected_move16, 1u16)]
@@ -997,13 +997,9 @@ fn multipv_to_policy(candidates: &[MultiPvCandidate], total: u16, temp: f64) -> 
     let mut sorted: Vec<&MultiPvCandidate> = candidates.iter().collect();
     sorted.sort_by_key(|c| c.multipv);
 
-    let scalar = |c: &MultiPvCandidate| -> f64 {
-        match c.score_mate {
-            Some(m) if m >= 0 => 10000.0,
-            Some(_) => -10000.0,
-            None => c.score_cp.clamp(-10000, 10000) as f64,
-        }
-    };
+    // 符号付きの score_cp（詰みも大きな正/負の値で符号を持つ）を ±10000 にクリップして
+    // softmax 入力にする。score_mate は手数のみで勝敗符号を持たない経路があるため使わない。
+    let scalar = |c: &MultiPvCandidate| -> f64 { f64::from(c.score_cp.clamp(-10000, 10000)) };
     let max_s = sorted.iter().map(|c| scalar(c)).fold(f64::NEG_INFINITY, f64::max);
     let weights: Vec<f64> = sorted.iter().map(|c| ((scalar(c) - max_s) / temp).exp()).collect();
     let sum: f64 = weights.iter().sum();
@@ -1554,7 +1550,7 @@ fn worker_main(
                                             eval_log.as_ref().and_then(|e| e.score_cp),
                                             eval_log.as_ref().and_then(|e| e.score_mate),
                                             Some(mv),
-                                            Some(played_mv),
+                                            played_mv,
                                             &search.multipv_candidates,
                                         );
                                     }
@@ -2877,6 +2873,8 @@ mod tests {
         assert_eq!(mate_to_eval(39), 31961);
         assert_eq!(mate_to_eval(-1), -31999);
         assert_eq!(mate_to_eval(-39), -31961);
+        // 境界: 手数 0 でも詰み帯に収まる
+        assert_eq!(mate_to_eval(0), 32000);
         // 巨大 ply でも詰み帯（|eval| >= 30000）に収まる
         assert!(mate_to_eval(5000) >= 30001);
         assert!(mate_to_eval(-5000) <= -30001);
@@ -2918,8 +2916,8 @@ mod tests {
         assert_eq!(policy[0].0, move_to_move16(m1));
         assert!(policy[0].1 >= 1);
         let sum: i32 = policy.iter().map(|(_, v)| *v as i32).sum();
-        // 量子化の丸めで total と多少ずれるが近い
-        assert!((sum - 1000).abs() <= policy.len() as i32);
+        // largest-remainder で総票数は total に厳密一致する
+        assert_eq!(sum, 1000);
     }
 
     #[test]
@@ -2985,7 +2983,7 @@ mod tests {
                 TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
                     .unwrap();
             col.start_game();
-            col.record_position(&pos, Some(123), None, Some(mv), Some(mv), &candidates);
+            col.record_position(&pos, Some(123), None, Some(mv), mv, &candidates);
             col.finish_game(GameOutcome::BlackWin).unwrap();
             col.flush().unwrap();
         }
@@ -3046,7 +3044,7 @@ mod tests {
                 TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
                     .unwrap();
             col.start_game();
-            col.record_position(&pos, Some(100), None, Some(m1), Some(m1), &candidates);
+            col.record_position(&pos, Some(100), None, Some(m1), m1, &candidates);
             col.finish_game(GameOutcome::WhiteWin).unwrap();
             col.flush().unwrap();
         }
@@ -3104,6 +3102,37 @@ mod tests {
     }
 
     #[test]
+    fn multipv_to_policy_downweights_losing_mate() {
+        use rshogi_core::types::Move;
+        use tools::packed_sfen::move_to_move16;
+        use tools::selfplay::MultiPvCandidate;
+
+        let good = Move::from_usi("7g7f").unwrap();
+        let losing = Move::from_usi("2g2f").unwrap();
+        // PV2 は負け詰み: score_mate は手数のみで正(5)、勝敗符号は score_cp(大きな負)に残る
+        let candidates = vec![
+            MultiPvCandidate {
+                multipv: 1,
+                score_cp: 120,
+                score_mate: None,
+                first_move: good,
+            },
+            MultiPvCandidate {
+                multipv: 2,
+                score_cp: -30000,
+                score_mate: Some(5),
+                first_move: losing,
+            },
+        ];
+        let policy = multipv_to_policy(&candidates, 1000, 600.0);
+        let good_v = policy.iter().find(|(m, _)| *m == move_to_move16(good)).map_or(0, |(_, v)| *v);
+        let losing_v =
+            policy.iter().find(|(m, _)| *m == move_to_move16(losing)).map_or(0, |(_, v)| *v);
+        // 符号付き score_cp で負け詰みは大きく減点され、PV1 を上回らない
+        assert!(good_v > losing_v);
+    }
+
+    #[test]
     fn finish_game_hcpe3_records_played_move_not_pv1() {
         use rshogi_core::position::Position;
         use rshogi_core::types::Move;
@@ -3124,7 +3153,7 @@ mod tests {
                     .unwrap();
             col.start_game();
             // 実着手 played != 最善手 best。selectedMove16 は replay 用に played を記録する
-            col.record_position(&pos, Some(100), None, Some(best), Some(played), &candidates);
+            col.record_position(&pos, Some(100), None, Some(best), played, &candidates);
             col.finish_game(GameOutcome::BlackWin).unwrap();
             col.flush().unwrap();
         }
@@ -3153,7 +3182,7 @@ mod tests {
                     .unwrap();
             col.start_game();
             // --random-multi-pv 未指定相当: 候補なし → 実着手の one-hot (visit=1)
-            col.record_position(&pos, Some(50), None, Some(mv), Some(mv), &[]);
+            col.record_position(&pos, Some(50), None, Some(mv), mv, &[]);
             col.finish_game(GameOutcome::BlackWin).unwrap();
             col.flush().unwrap();
         }
@@ -3187,7 +3216,7 @@ mod tests {
                 Some(20),
                 None,
                 Some(m1),
-                Some(m1),
+                m1,
                 &[legal_candidate(1, 20, "7g7f")],
             );
             let gc = pos.gives_check(m1);
@@ -3198,7 +3227,7 @@ mod tests {
                 Some(-15),
                 None,
                 Some(m2),
-                Some(m2),
+                m2,
                 &[legal_candidate(1, -15, "3c3d")],
             );
             col.finish_game(GameOutcome::Draw).unwrap();
@@ -3242,16 +3271,16 @@ mod tests {
                 Some(50),
                 None,
                 Some(m1),
-                Some(m1),
+                m1,
                 &[legal_candidate(1, 50, "7g7f")],
             );
-            col.record_position(&pos, None, None, Some(m1), Some(m1), &[]);
+            col.record_position(&pos, None, None, Some(m1), m1, &[]);
             col.record_position(
                 &after,
                 Some(40),
                 None,
                 Some(m2),
-                Some(m2),
+                m2,
                 &[legal_candidate(1, 40, "3c3d")],
             );
             col.finish_game(GameOutcome::BlackWin).unwrap();
