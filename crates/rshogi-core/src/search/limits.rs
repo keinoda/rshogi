@@ -170,16 +170,18 @@ impl LimitsType {
     /// 「実際に enforce される停止条件」のみを予算とみなす:
     /// - `use_time_management()`: 純粋な時間管理が有効で時間で停止する（`go depth N btime T` の
     ///   ように depth 併用だと時間管理は無効化されるため `true` にならず、この場合は cap 対象）。
-    /// - movetime / rtime: 固定思考時間で停止（depth 併用でも enforce される）。
+    ///   `rtime` は `time_manager.init` でこの判定が真のときだけ反映されるため（depth 併用時は
+    ///   `!use_time_management()` の早期 return より後で処理され enforce されない）、ここでは
+    ///   独立項を持たず `use_time_management()` に内包する。
+    /// - movetime: 固定思考時間。`time_manager.init` の最初に処理され depth 併用でも enforce される。
     /// - nodes: ノード数で停止。
     /// - infinite: `stop` で打ち切り可能。
+    ///
+    /// なお `go perft N` は `use_time_management()` が `false` になり「予算なし」扱いだが、
+    /// perft は alpha-beta を通らず SE に到達しないため cap は発火しない（実害なし）。
     #[inline]
     pub fn has_interrupt_budget(&self) -> bool {
-        self.use_time_management()
-            || self.movetime != 0
-            || self.rtime != 0
-            || self.nodes != 0
-            || self.infinite
+        self.use_time_management() || self.movetime != 0 || self.nodes != 0 || self.infinite
     }
 }
 
@@ -271,21 +273,21 @@ mod tests {
         l.mate = 5;
         assert!(!l.has_interrupt_budget());
 
-        // 純粋な時間管理（depth 併用なし）は予算あり。increment のみ（go binc）も時間管理が有効。
+        // 純粋な時間管理（depth 併用なし）は予算あり。increment のみ（go binc）・rtime 単独も時間管理が有効。
         for set in [
             |l: &mut LimitsType| l.time[Color::Black.index()] = 60000,
             |l: &mut LimitsType| l.byoyomi[Color::Black.index()] = 30000,
             |l: &mut LimitsType| l.inc[Color::Black.index()] = 1000,
+            |l: &mut LimitsType| l.rtime = 1000,
         ] {
             let mut l = LimitsType::new();
             set(&mut l);
             assert!(l.has_interrupt_budget());
         }
 
-        // movetime / rtime / nodes / infinite は depth 併用でも enforce されるため予算あり
+        // movetime / nodes / infinite は depth 併用でも enforce されるため予算あり
         for set in [
             |l: &mut LimitsType| l.movetime = 1000,
-            |l: &mut LimitsType| l.rtime = 1000,
             |l: &mut LimitsType| l.nodes = 100000,
             |l: &mut LimitsType| l.infinite = true,
         ] {
@@ -294,6 +296,13 @@ mod tests {
             set(&mut l);
             assert!(l.has_interrupt_budget());
         }
+
+        // depth + rtime は time_manager.init で rtime 処理前に !use_time_management() で早期 return
+        // され rtime が enforce されない → 予算なし扱い（cap 対象）
+        let mut l = LimitsType::new();
+        l.depth = 15;
+        l.rtime = 1000;
+        assert!(!l.has_interrupt_budget());
 
         // depth と残り時間/秒読みの併用は時間管理が無効化される（time MAX/2 で実 enforce されない）
         // ため予算なし扱い → cap 対象とし、この組合せでもハングしないようにする
