@@ -27,11 +27,13 @@
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{
-    DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
+    DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS, NNUE_VERSION,
     NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
 };
 #[cfg(feature = "layerstacks-768x8x32")]
 use super::constants::{LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN};
+#[cfg(feature = "layerstacks-1024x16x32")]
+use super::constants::{LAYER_STACK_8X64_L1_OUT, LAYER_STACK_8X64_L2_IN, LAYER_STACK_8X64_L3_OUT};
 #[cfg(any(
     feature = "layerstacks-1536x16x32",
     feature = "layerstacks-768x16x32",
@@ -42,7 +44,10 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
+use super::layer_stacks::{
+    LayerStacks, compute_bucket_index, compute_king_ranks, sqr_clipped_relu_transform,
+};
+use super::leb128::LEB128_MAGIC;
 #[cfg(feature = "ft-halfka_hm_merged")]
 use super::ls_feature_spec::HalfKaHmMergedSpec;
 #[cfg(feature = "ft-halfka_hm_split")]
@@ -57,6 +62,10 @@ use super::ls_feature_spec::LsFeatureSpec;
 use super::network::{
     LayerStackBucketMode, compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
     get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights, parse_fv_scale_from_arch,
+};
+#[cfg(feature = "layerstack-arch")]
+use super::spec::{
+    LayerStackBucketSelection, LayerStackHiddenActivation, ParsedLayerStacksArchitecture,
 };
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -74,11 +83,18 @@ fn compute_layer_stacks_bucket_index(
     pos: &Position,
     side_to_move: Color,
     num_buckets: usize,
+    bucket_mode: LayerStackBucketMode,
 ) -> usize {
-    match get_layer_stack_bucket_mode() {
+    match bucket_mode {
         LayerStackBucketMode::Progress8KPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
             compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights, num_buckets)
+        }
+        LayerStackBucketMode::KingRank9 => {
+            let f_king = pos.king_square(side_to_move);
+            let e_king = pos.king_square(!side_to_move);
+            let (f_rank, e_rank) = compute_king_ranks(side_to_move, f_king, e_king);
+            compute_bucket_index(f_rank, e_rank).min(num_buckets.saturating_sub(1))
         }
     }
 }
@@ -139,16 +155,29 @@ pub struct NetworkLayerStacks<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
     FT: LsFeatureSpec,
 > {
     /// Feature Transformer (FT::DIMENSIONS → L1)
     pub feature_transformer: FeatureTransformerLayerStacks<L1, FT>,
     /// LayerStacks (`num_buckets` 個の bucket)
-    pub layer_stacks: LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+    pub layer_stacks: LayerStacks<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+    >,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
     /// bucket 数 (= net file の `num_buckets` field、legacy `.bin` は 9)
     pub num_buckets: usize,
+    /// この net が使う bucket 選択方式。
+    pub bucket_mode: LayerStackBucketMode,
     _ft: PhantomData<FT>,
 }
 
@@ -157,8 +186,21 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
     FT: LsFeatureSpec,
-> NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>
+>
+    NetworkLayerStacks<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+        FT,
+    >
 {
     /// ファイルから読み込み
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -185,25 +227,24 @@ impl<
         let mut buf4 = [0u8; 4];
 
         // version（呼び出し元 NNUENetwork::read で大枠の受理範囲を確認済み）
-        // ここでは LayerStack として受理する 2 つ:
+        // ここでは LayerStacks として受理する 3 系統:
+        // - `NNUE_VERSION` (= `0x7AF32F16`): legacy SFNNWithoutPsqt + `{LayerStack=N}`
         // - `NNUE_VERSION_HALFKA` (= `0x7AF32F20`): num_buckets field 無し、暗黙 9
         // - `NNUE_VERSION_LAYERSTACK_NUM_BUCKETS` (= `0x7AF32F21`): arch_str 直後に
         //   num_buckets u32 field を持つ self-describing layout
-        //
-        // HalfKP version `NNUE_VERSION (0x7AF32F16)` を `NNUE_ARCHITECTURE=LayerStacks`
-        // override 経由で本関数に渡されるケースの防衛: silent な偽 9-bucket 読込を
-        // 避けるため、ここで明示的に reject する。
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
-        if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
+        if version != NNUE_VERSION
+            && version != NNUE_VERSION_HALFKA
+            && version != NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "LayerStack reader expected version {NNUE_VERSION_HALFKA:#x} (legacy, \
-                     implicit num_buckets=9) or {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} \
-                     (self-describing with num_buckets header), got {version:#x}. \
-                     Non-LayerStack `.bin` cannot be dispatched to LayerStacks even via \
-                     `NNUE_ARCHITECTURE=LayerStacks` override."
+                    "LayerStack reader expected version {NNUE_VERSION:#x} (legacy LayerStack), \
+                     {NNUE_VERSION_HALFKA:#x} (legacy, implicit num_buckets=9) or \
+                     {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} (self-describing with \
+                     num_buckets header), got {version:#x}."
                 ),
             ));
         }
@@ -226,27 +267,62 @@ impl<
 
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
+        let layer_stack_arch =
+            super::spec::parse_layer_stacks_architecture(&arch_str).map_err(|msg| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid LayerStacks architecture string: {msg}; arch={arch_str}"),
+                )
+            })?;
+        if version == NNUE_VERSION
+            && layer_stack_arch.bucket_selection != LayerStackBucketSelection::KingRank9
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "LayerStack reader got legacy version {NNUE_VERSION:#x}, but arch string \
+                     has no LayerStack bucket marker: {arch_str}"
+                ),
+            ));
+        }
 
         // num_buckets-header layout: u32 を arch_str 直後・ft_hash 直前に読む。
         // legacy: field 無し → DEFAULT_NUM_BUCKETS (9) として進める。
         // tatara `save_quantised` の write 順と対称 (version → network_hash →
         // arch_len → arch_str → num_buckets → ft_hash → FT/PSQT/LayerStack blocks)。
+        let mut pre_read_ft_hash = None;
         let num_buckets = if has_num_buckets_field {
             reader.read_exact(&mut buf4)?;
             let n = u32::from_le_bytes(buf4) as usize;
             if n == 0 || n > MAX_LAYER_STACK_BUCKETS {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "NNUE LayerStack num_buckets={n} out of range (1..={MAX_LAYER_STACK_BUCKETS}). \
-                         Rebuild rshogi-core with a larger MAX_LAYER_STACK_BUCKETS if needed \
-                         (see ADR 2026-05-26)."
-                    ),
-                ));
+                // 一部の YO 互換 net は version 0x7AF32F21 だが num_buckets field を持たず、
+                // arch_str 直後に ft_hash → COMPRESSED_LEB128 が続く。直後の magic を確認し、
+                // その layout だけ legacy 9-bucket として受理する。
+                let mut magic = [0u8; 17];
+                reader.read_exact(&mut magic)?;
+                reader.seek(SeekFrom::Current(-(magic.len() as i64)))?;
+                if magic == LEB128_MAGIC {
+                    pre_read_ft_hash = Some(n as u32);
+                    DEFAULT_NUM_BUCKETS
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "NNUE LayerStack num_buckets={n} out of range (1..={MAX_LAYER_STACK_BUCKETS}). \
+                             Rebuild rshogi-core with a larger MAX_LAYER_STACK_BUCKETS if needed \
+                             (see ADR 2026-05-26)."
+                        ),
+                    ));
+                }
+            } else {
+                n
             }
-            n
         } else {
             DEFAULT_NUM_BUCKETS
+        };
+        let bucket_mode = match layer_stack_arch.bucket_selection {
+            LayerStackBucketSelection::KingRank9 => LayerStackBucketMode::KingRank9,
+            LayerStackBucketSelection::Configured => get_layer_stack_bucket_mode(),
         };
 
         // FV_SCALE 検出
@@ -267,8 +343,12 @@ impl<
         }
 
         // Feature transformer hash を読み飛ばす
-        reader.read_exact(&mut buf4)?;
-        let _ft_hash = u32::from_le_bytes(buf4);
+        let _ft_hash = if let Some(ft_hash) = pre_read_ft_hash {
+            ft_hash
+        } else {
+            reader.read_exact(&mut buf4)?;
+            u32::from_le_bytes(buf4)
+        };
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
         // read_psqt/read_threat_weights と末尾の share_weights() で変更するため mut
@@ -404,6 +484,7 @@ impl<
             layer_stacks,
             fv_scale,
             num_buckets,
+            bucket_mode,
             _ft: PhantomData,
         })
     }
@@ -412,7 +493,15 @@ impl<
     #[cfg(feature = "diagnostics")]
     fn log_load_diagnostics(
         ft: &FeatureTransformerLayerStacks<L1, FT>,
-        ls: &LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+        ls: &LayerStacks<
+            L1,
+            LS_L1_OUT,
+            LS_L2_IN,
+            LS_L2_PADDED_INPUT,
+            LS_L3_OUT,
+            LS_L3_PADDED_INPUT,
+            USE_SQR_CONCAT,
+        >,
     ) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
@@ -444,7 +533,12 @@ impl<
     /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
+        let bucket_index = compute_layer_stacks_bucket_index(
+            pos,
+            side_to_move,
+            self.num_buckets,
+            self.bucket_mode,
+        );
         self.evaluate_with_bucket(pos, acc, bucket_index)
     }
 
@@ -593,11 +687,13 @@ impl<
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed.0[0..32]);
 
         // バケットインデックスを計算（通常パスと同じ共通関数を使用）
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
-        info!(
-            "[NNUE Eval] bucket_mode={:?}, bucket_index={bucket_index}",
-            get_layer_stack_bucket_mode()
+        let bucket_index = compute_layer_stacks_bucket_index(
+            pos,
+            side_to_move,
+            self.num_buckets,
+            self.bucket_mode,
         );
+        info!("[NNUE Eval] bucket_mode={:?}, bucket_index={bucket_index}", self.bucket_mode);
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =
@@ -710,6 +806,9 @@ pub type NetworkLayerStacks1536x16x32 = NetworkLayerStacks<
     LAYER_STACK_16X32_L1_OUT,
     LAYER_STACK_16X32_L2_IN,
     32,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
 #[cfg(all(feature = "layerstacks-1536x32x32", feature = "ft-halfka_hm_merged"))]
@@ -718,6 +817,9 @@ pub type NetworkLayerStacks1536x32x32 = NetworkLayerStacks<
     LAYER_STACK_32X32_L1_OUT,
     LAYER_STACK_32X32_L2_IN,
     64,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
 #[cfg(all(feature = "layerstacks-768x16x32", feature = "ft-halfka_hm_merged"))]
@@ -726,6 +828,9 @@ pub type NetworkLayerStacks768x16x32 = NetworkLayerStacks<
     LAYER_STACK_16X32_L1_OUT,
     LAYER_STACK_16X32_L2_IN,
     32,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
 #[cfg(all(feature = "layerstacks-768x8x32", feature = "ft-halfka_hm_merged"))]
@@ -734,6 +839,9 @@ pub type NetworkLayerStacks768x8x32 = NetworkLayerStacks<
     LAYER_STACK_8X32_L1_OUT,
     LAYER_STACK_8X32_L2_IN,
     32,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
 #[cfg(all(feature = "layerstacks-512x16x32", feature = "ft-halfka_hm_merged"))]
@@ -742,6 +850,9 @@ pub type NetworkLayerStacks512x16x32 = NetworkLayerStacks<
     LAYER_STACK_16X32_L1_OUT,
     LAYER_STACK_16X32_L2_IN,
     32,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
 #[cfg(all(feature = "layerstacks-1024x16x32", feature = "ft-halfka_hm_merged"))]
@@ -750,9 +861,11 @@ pub type NetworkLayerStacks1024x16x32 = NetworkLayerStacks<
     LAYER_STACK_16X32_L1_OUT,
     LAYER_STACK_16X32_L2_IN,
     32,
+    32,
+    32,
+    true,
     HalfKaHmMergedSpec,
 >;
-
 // =============================================================================
 // LayerStacksNetwork - 2-tier (FT, L1) dispatch enum
 // =============================================================================
@@ -767,27 +880,108 @@ pub type NetworkLayerStacks1024x16x32 = NetworkLayerStacks<
 pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     #[cfg(feature = "layerstacks-1536x16x32")]
     L1536x16x32(
-        Box<NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+        Box<
+            NetworkLayerStacks<
+                1536,
+                LAYER_STACK_16X32_L1_OUT,
+                LAYER_STACK_16X32_L2_IN,
+                32,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
     ),
     #[cfg(feature = "layerstacks-1536x32x32")]
     L1536x32x32(
-        Box<NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64, FT>>,
+        Box<
+            NetworkLayerStacks<
+                1536,
+                LAYER_STACK_32X32_L1_OUT,
+                LAYER_STACK_32X32_L2_IN,
+                64,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
     ),
     #[cfg(feature = "layerstacks-1024x16x32")]
     L1024x16x32(
-        Box<NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+        Box<
+            NetworkLayerStacks<
+                1024,
+                LAYER_STACK_16X32_L1_OUT,
+                LAYER_STACK_16X32_L2_IN,
+                32,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
+    ),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x8x64(
+        Box<
+            NetworkLayerStacks<
+                1024,
+                LAYER_STACK_8X64_L1_OUT,
+                LAYER_STACK_8X64_L2_IN,
+                32,
+                LAYER_STACK_8X64_L3_OUT,
+                64,
+                false,
+                FT,
+            >,
+        >,
     ),
     #[cfg(feature = "layerstacks-768x16x32")]
     L768x16x32(
-        Box<NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+        Box<
+            NetworkLayerStacks<
+                768,
+                LAYER_STACK_16X32_L1_OUT,
+                LAYER_STACK_16X32_L2_IN,
+                32,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
     ),
     #[cfg(feature = "layerstacks-768x8x32")]
     L768x8x32(
-        Box<NetworkLayerStacks<768, LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN, 32, FT>>,
+        Box<
+            NetworkLayerStacks<
+                768,
+                LAYER_STACK_8X32_L1_OUT,
+                LAYER_STACK_8X32_L2_IN,
+                32,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
     ),
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(
-        Box<NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+        Box<
+            NetworkLayerStacks<
+                512,
+                LAYER_STACK_16X32_L1_OUT,
+                LAYER_STACK_16X32_L2_IN,
+                32,
+                32,
+                32,
+                true,
+                FT,
+            >,
+        >,
     ),
     #[cfg(not(any(
         feature = "layerstacks-1536x16x32",
@@ -819,6 +1013,8 @@ macro_rules! ls_match_size {
             LsNetByFt::L512x16x32($pat) => $body,
             #[cfg(feature = "layerstacks-1024x16x32")]
             LsNetByFt::L1024x16x32($pat) => $body,
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            LsNetByFt::L1024x8x64($pat) => $body,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -848,6 +1044,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L512x16x32(_) => 512,
             #[cfg(feature = "layerstacks-1024x16x32")]
             Self::L1024x16x32(_) => 1024,
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x8x64(_) => 1024,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -875,6 +1073,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L512x16x32(_) => (512, 16, 32),
             #[cfg(feature = "layerstacks-1024x16x32")]
             Self::L1024x16x32(_) => (1024, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x8x64(_) => (1024, 8, 64),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -909,85 +1109,130 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         ls_match_size!(self, net => net.num_buckets)
     }
 
-    /// (L1, L2, L3) と PSQT override から読み込み (FT は型レベルで固定)。
+    /// 現在 load されている net の bucket 選択方式。
+    pub fn bucket_mode(&self) -> LayerStackBucketMode {
+        ls_match_size!(self, net => net.bucket_mode)
+    }
+
+    /// LayerStacks descriptor と PSQT override から読み込み (FT は型レベルで固定)。
     #[cfg(feature = "layerstack-arch")]
     fn read_with_options<R: Read + Seek>(
         reader: &mut R,
-        l1: usize,
-        l2: usize,
-        l3: usize,
+        desc: ParsedLayerStacksArchitecture,
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
-        match (l1, l2, l3) {
+        match desc.dispatch_key() {
             #[cfg(feature = "layerstacks-1536x16x32")]
-            (1536, 16, 32) => {
+            (1536, 16, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     1536,
                     LAYER_STACK_16X32_L1_OUT,
                     LAYER_STACK_16X32_L2_IN,
                     32,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-1536x32x32")]
-            (1536, 32, 32) => {
+            (1536, 32, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     1536,
                     LAYER_STACK_32X32_L1_OUT,
                     LAYER_STACK_32X32_L2_IN,
                     64,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x32x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-768x16x32")]
-            (768, 16, 32) => {
+            (768, 16, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     768,
                     LAYER_STACK_16X32_L1_OUT,
                     LAYER_STACK_16X32_L2_IN,
                     32,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-768x8x32")]
-            (768, 8, 32) => {
+            (768, 8, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     768,
                     LAYER_STACK_8X32_L1_OUT,
                     LAYER_STACK_8X32_L2_IN,
                     32,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768x8x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-512x16x32")]
-            (512, 16, 32) => {
+            (512, 16, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     512,
                     LAYER_STACK_16X32_L1_OUT,
                     LAYER_STACK_16X32_L2_IN,
                     32,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L512x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-1024x16x32")]
-            (1024, 16, 32) => {
+            (1024, 16, 32, LayerStackHiddenActivation::SqrClippedReluConcat) => {
                 let net = NetworkLayerStacks::<
                     1024,
                     LAYER_STACK_16X32_L1_OUT,
                     LAYER_STACK_16X32_L2_IN,
                     32,
+                    32,
+                    32,
+                    true,
                     FT,
                 >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1024x16x32(Box::new(net)))
             }
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            (1024, 8, 64, LayerStackHiddenActivation::ClippedRelu) => {
+                let net = NetworkLayerStacks::<
+                    1024,
+                    LAYER_STACK_8X64_L1_OUT,
+                    LAYER_STACK_8X64_L2_IN,
+                    32,
+                    LAYER_STACK_8X64_L3_OUT,
+                    64,
+                    false,
+                    FT,
+                >::read_with_options(reader, psqt_override)?;
+                Ok(Self::L1024x8x64(Box::new(net)))
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Unsupported LayerStacks architecture: {l1}x{l2}x{l3}"),
+                format!(
+                    "Unsupported LayerStacks architecture: feature_set={}, l1={}, header_l2={}, \
+                     layer1_output={}, layer2_input={}, l3={}, activation={}",
+                    desc.feature_set,
+                    desc.l1,
+                    desc.header_l2,
+                    desc.layer1_output,
+                    desc.layer2_input,
+                    desc.l3,
+                    desc.hidden_activation.as_str()
+                ),
             )),
         }
     }
@@ -1036,6 +1281,11 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             #[cfg(feature = "layerstacks-1024x16x32")]
             (
                 Self::L1024x16x32(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
+            ) => net.evaluate(pos, &st.current().accumulator),
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            (
+                Self::L1024x8x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
             #[cfg(any(
@@ -1206,6 +1456,13 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             ) => {
                 do_update!(net, st, L1024x16x32);
             }
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            (
+                Self::L1024x8x64(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
+            ) => {
+                do_update!(net, st, L1024x16x32);
+            }
             #[cfg(any(
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
@@ -1268,6 +1525,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1024>::new(),
                 )
             }
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x8x64(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(
+                    super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1024>::new(),
+                )
+            }
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -1314,6 +1577,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             }
             #[cfg(feature = "layerstacks-1024x16x32")]
             Self::L1024x16x32(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccCache::L1024x16x32(
+                    super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1024>::new(),
+                )
+            }
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x8x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1024x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1024>::new(),
                 )
@@ -1368,6 +1637,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             }
             #[cfg(feature = "layerstacks-1024x16x32")]
             Self::L1024x16x32(net) => {
+                let mut acc = AccumulatorLayerStacks::<1024>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
+            #[cfg(feature = "layerstacks-1024x16x32")]
+            Self::L1024x8x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<1024>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
@@ -1499,6 +1774,10 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L1024x8x64($inner),
+            ) => $body,
             #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x16x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
@@ -1613,6 +1892,11 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.num_buckets())
     }
 
+    /// 現在 load されている net の bucket 選択方式。
+    pub fn bucket_mode(&self) -> LayerStackBucketMode {
+        ls_match_ft!(self, by_ft => by_ft.bucket_mode())
+    }
+
     /// アーキテクチャ仕様を取得
     pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
         ls_match_ft!(self, by_ft => by_ft.architecture_spec())
@@ -1623,27 +1907,21 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.fv_scale())
     }
 
-    /// ファイルから読み込み (FT は arch_str から検出、L1/L2/L3 は呼び出し元が渡す)。
+    /// ファイルから読み込み (FT と LayerStacks descriptor は arch_str から検出)。
     #[cfg(feature = "layerstack-arch")]
     pub fn read_with_options<R: Read + Seek>(
         reader: &mut R,
-        l1: usize,
-        l2: usize,
-        l3: usize,
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
-        let ft_set = peek_layer_stacks_feature_set(reader)?;
-        Self::read_with_feature_set(reader, ft_set, l1, l2, l3, psqt_override)
+        let desc = peek_layer_stacks_architecture(reader)?;
+        Self::read_with_descriptor(reader, desc, psqt_override)
     }
 
-    /// ファイルから読み込み (FT 明示)。テスト・診断ツールから FT を強制したい場合に使う。
+    /// ファイルから読み込み (descriptor 明示)。テスト・診断ツールから強制したい場合に使う。
     #[cfg(feature = "layerstack-arch")]
-    pub fn read_with_feature_set<R: Read + Seek>(
+    pub fn read_with_descriptor<R: Read + Seek>(
         reader: &mut R,
-        feature_set: super::spec::FeatureSet,
-        l1: usize,
-        l2: usize,
-        l3: usize,
+        desc: ParsedLayerStacksArchitecture,
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
         // FT 軸を `match feature_set` で dispatch する。各 FT について該当 `ft-*` feature が
@@ -1654,13 +1932,8 @@ impl LayerStacksNetwork {
             ($ft_feat:literal, $ft_spec:ty, $self_variant:ident, $name:literal) => {{
                 #[cfg(feature = $ft_feat)]
                 {
-                    let inner = LsNetByFt::<$ft_spec>::read_with_options(
-                        reader,
-                        l1,
-                        l2,
-                        l3,
-                        psqt_override,
-                    )?;
+                    let inner =
+                        LsNetByFt::<$ft_spec>::read_with_options(reader, desc, psqt_override)?;
                     Ok(Self::$self_variant(inner))
                 }
                 #[cfg(not(feature = $ft_feat))]
@@ -1677,7 +1950,7 @@ impl LayerStacksNetwork {
             }};
         }
         use super::spec::FeatureSet as Fs;
-        match feature_set {
+        match desc.feature_set {
             Fs::HalfKaHmMerged | Fs::LayerStacks => {
                 read_into_variant!(
                     "ft-halfka_hm_merged",
@@ -1753,24 +2026,17 @@ impl LayerStacksNetwork {
     }
 }
 
-/// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
-///
-/// tatara emit 形式の arch_str は `Features=<FT>(Friend)[<dim>->1536x2],...` で、
-/// `Features=` 直後のキーワード (HalfKaHmMerged / HalfKaHmSplit / HalfKaMerged /
-/// HalfKaSplit / HalfKP の PascalCase 5 種) を最優先で読み取る。無ければ汎用
-/// `parse_feature_set_from_arch` (LayerStacks fallback 含む) に委譲する。完全に
-/// 判別不能なモデルは `FeatureSet::LayerStacks` を返し、上位の `read_with_feature_set`
-/// で HalfKaHmMerged 互換扱いになる。
+/// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、descriptor を作る。
 ///
 /// 読み取り後は `Seek::seek(SeekFrom::Start(original))` で reader 位置を巻き戻す。
 /// `BufReader<File>` 等の seekable reader では seek 時に内部 buffer が破棄・再同期される
 /// ため、後続の本読み込みに影響しない。peek 自体が失敗しても巻き戻しは試みる。
 #[cfg(feature = "layerstack-arch")]
-fn peek_layer_stacks_feature_set<R: Read + Seek>(
+fn peek_layer_stacks_architecture<R: Read + Seek>(
     reader: &mut R,
-) -> io::Result<super::spec::FeatureSet> {
+) -> io::Result<ParsedLayerStacksArchitecture> {
     let original = reader.stream_position()?;
-    let result = (|| -> io::Result<super::spec::FeatureSet> {
+    let result = (|| -> io::Result<ParsedLayerStacksArchitecture> {
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;
         reader.read_exact(&mut buf4)?;
@@ -1785,27 +2051,15 @@ fn peek_layer_stacks_feature_set<R: Read + Seek>(
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
         let arch_str = String::from_utf8_lossy(&arch);
-        Ok(detect_layer_stacks_feature_set(&arch_str))
+        super::spec::parse_layer_stacks_architecture(&arch_str).map_err(|msg| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid LayerStacks architecture string: {msg}; arch={arch_str}"),
+            )
+        })
     })();
     reader.seek(SeekFrom::Start(original))?;
     result
-}
-
-/// arch_str から LS の FT を判別する pure helper (peek の純粋ロジック部分)。
-#[cfg(feature = "layerstack-arch")]
-fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
-    use super::spec::FeatureSet as Fs;
-    if let Some(name) = super::spec::parse_feature_set_keyword(arch_str) {
-        match name {
-            "HalfKP" => return Fs::HalfKP,
-            "HalfKaSplit" => return Fs::HalfKaSplit,
-            "HalfKaMerged" => return Fs::HalfKaMerged,
-            "HalfKaHmSplit" => return Fs::HalfKaHmSplit,
-            "HalfKaHmMerged" => return Fs::HalfKaHmMerged,
-            _ => {}
-        }
-    }
-    super::spec::parse_feature_set_from_arch(arch_str).unwrap_or(Fs::LayerStacks)
 }
 
 /// arch_str の `Threat=<dims>` トークンから次元数を取り出す。
@@ -2038,12 +2292,12 @@ mod tests {
         }
     }
 
-    /// `detect_layer_stacks_feature_set` が tatara emit 形式の arch_str (PascalCase) を
+    /// `parse_layer_stacks_feature_set_from_arch` が tatara emit 形式の arch_str (PascalCase) を
     /// 5 FT 全てで正しく分岐することを確認する。
     ///
     /// 実 NNUE の arch_str は `LayerStacks` キーワードを含まないため、`SqrClippedReLU`
     /// と `ClippedReLU` の混在指紋で `parse_feature_set_from_arch` は `LayerStacks` を
-    /// 返してしまう (旧バグの根因)。`detect_layer_stacks_feature_set` は `Features=`
+    /// 返してしまう (旧バグの根因)。LayerStacks 専用 parser は `Features=`
     /// keyword 優先で FT を識別する。
     #[cfg(feature = "layerstack-arch")]
     #[test]
@@ -2082,7 +2336,8 @@ mod tests {
         ];
 
         for (arch_str, expected) in cases {
-            let got = detect_layer_stacks_feature_set(arch_str);
+            let got = crate::nnue::spec::parse_layer_stacks_feature_set_from_arch(arch_str)
+                .unwrap_or(Fs::LayerStacks);
             assert_eq!(
                 got, *expected,
                 "arch_str={arch_str:?} → expected {expected:?}, got {got:?}"
@@ -2097,10 +2352,13 @@ mod tests {
     fn test_detect_feature_set_fallback() {
         use crate::nnue::spec::FeatureSet as Fs;
         // Features= が無く LayerStacks キーワードがあるケース → fallback で LayerStacks
-        let got = detect_layer_stacks_feature_set("LayerStacks(...)");
+        let got = crate::nnue::spec::parse_layer_stacks_feature_set_from_arch("LayerStacks(...)")
+            .unwrap_or(Fs::LayerStacks);
         assert_eq!(got, Fs::LayerStacks);
         // 完全に未知 → fallback の unwrap_or で LayerStacks
-        let got = detect_layer_stacks_feature_set("unknown-arch-string");
+        let got =
+            crate::nnue::spec::parse_layer_stacks_feature_set_from_arch("unknown-arch-string")
+                .unwrap_or(Fs::LayerStacks);
         assert_eq!(got, Fs::LayerStacks);
     }
 }

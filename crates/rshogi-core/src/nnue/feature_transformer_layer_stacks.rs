@@ -1865,7 +1865,9 @@ mod tests {
     use super::*;
     use crate::nnue::accumulator::ChangedBonaPiece;
     use crate::nnue::bona_piece::ExtBonaPiece;
-    use crate::nnue::constants::{DEFAULT_NUM_BUCKETS, HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
+    #[cfg(feature = "nnue-psqt")]
+    use crate::nnue::constants::DEFAULT_NUM_BUCKETS;
+    use crate::nnue::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
     use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
     use crate::nnue::piece_list::PieceNumber;
     use crate::types::{File, Piece, PieceType, Rank, Square};

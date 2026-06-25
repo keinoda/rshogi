@@ -37,6 +37,8 @@ const ENGINE_VERSION: &str = "0.1.0";
 const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
+/// サーバー向けに GUI へ提示する Hash / EvalHash の上限（MB）。
+const MAX_SERVER_HASH_MB: usize = 262_144;
 
 fn load_progress_coeff_kpabs(path: &str) -> Result<Box<[f32]>, String> {
     let bytes = std::fs::read(path)
@@ -218,7 +220,7 @@ impl UsiEngine {
         println!("id author {ENGINE_AUTHOR}");
         println!();
         // オプション（将来的に追加）
-        println!("option name USI_Hash type spin default 256 min 1 max 4096");
+        println!("option name USI_Hash type spin default 256 min 1 max {MAX_SERVER_HASH_MB}");
         println!("option name Threads type spin default 1 min 1 max 512");
         println!("option name USI_Ponder type check default false");
         println!("option name Stochastic_Ponder type check default false");
@@ -234,7 +236,7 @@ impl UsiEngine {
         println!(
             "option name DrawValueWhite type spin default {DEFAULT_DRAW_VALUE_WHITE} min -30000 max 30000"
         );
-        println!("option name EvalHash type spin default 256 min 0 max 4096");
+        println!("option name EvalHash type spin default 256 min 0 max {MAX_SERVER_HASH_MB}");
         println!("option name UseEvalHash type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
         println!("option name UCI_LimitStrength type check default false");
@@ -250,7 +252,7 @@ impl UsiEngine {
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
-            "option name LS_BUCKET_MODE type combo default {} var progress8kpabs",
+            "option name LS_BUCKET_MODE type combo default {} var progress8kpabs var kingrank9",
             LayerStackBucketMode::Progress8KPAbs.as_str()
         );
         println!("option name LS_PROGRESS_COEFF type string default <empty>");
@@ -329,13 +331,12 @@ impl UsiEngine {
         // (HalfKP/HalfKaSplit/HalfKaHmMerged/HalfKaMerged/HalfKaHmSplit) や Material 評価では
         // 使われないため、ロード済みネットワークが LayerStacks のときだけ検査する。
         {
-            use rshogi_core::nnue::{
-                LayerStackBucketMode, get_layer_stack_bucket_mode,
-                get_layer_stack_progress_kpabs_weights,
-            };
-            let is_layer_stacks = get_network().as_deref().is_some_and(|n| n.is_layer_stacks());
-            if is_layer_stacks
-                && get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
+            use rshogi_core::nnue::{LayerStackBucketMode, get_layer_stack_progress_kpabs_weights};
+            let progress_required = get_network()
+                .as_deref()
+                .and_then(|n| n.layer_stack_bucket_mode())
+                .is_some_and(|mode| mode == LayerStackBucketMode::Progress8KPAbs);
+            if progress_required
                 && get_layer_stack_progress_kpabs_weights().iter().all(|&w| w == 0.0)
             {
                 panic!(
@@ -796,7 +797,7 @@ impl UsiEngine {
                 }
                 None => {
                     eprintln!(
-                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected progress8kpabs",
+                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected progress8kpabs or kingrank9",
                         value
                     );
                 }

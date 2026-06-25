@@ -16,12 +16,9 @@
 //! ```
 
 use super::accumulator::Aligned;
-use super::constants::{DEFAULT_NUM_BUCKETS, MAX_LAYER_STACK_BUCKETS, NNUE_PYTORCH_L3};
+use super::constants::{DEFAULT_NUM_BUCKETS, MAX_LAYER_STACK_BUCKETS};
 use super::layers::AffineTransform;
 use std::io::{self, Read};
-
-/// Output 入力のパディング済み次元数（padded_input(32) = 32）
-const OUTPUT_PADDED_INPUT: usize = super::layers::padded_input(NNUE_PYTORCH_L3);
 
 #[cfg(test)]
 fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut [u8; DIM]) {
@@ -47,13 +44,16 @@ pub struct LayerStackBucket<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
 > {
     /// L1層: L1 → LS_L1_OUT
     pub l1: AffineTransform<L1, LS_L1_OUT>,
-    /// L2層: LS_L2_IN → 32
-    pub l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
-    /// 出力層: 32 → 1
-    pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
+    /// L2層: LS_L2_IN → LS_L3_OUT
+    pub l2: AffineTransform<LS_L2_IN, LS_L3_OUT>,
+    /// 出力層: LS_L3_OUT → 1
+    pub output: AffineTransform<LS_L3_OUT, 1>,
 }
 
 impl<
@@ -61,7 +61,19 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
+>
+    LayerStackBucket<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+    >
 {
     const MAIN_DIM: usize = LS_L1_OUT - 1;
 
@@ -69,13 +81,24 @@ impl<
     pub fn new() -> Self {
         const {
             assert!(LS_L1_OUT >= 2, "LayerStacks L1 output must be at least 2");
-            assert!(
-                LS_L2_IN == (LS_L1_OUT - 1) * 2,
-                "LayerStacks L2 input must be 2 * (L1 output - 1)"
-            );
+            if USE_SQR_CONCAT {
+                assert!(
+                    LS_L2_IN == (LS_L1_OUT - 1) * 2,
+                    "LayerStacks L2 input must be 2 * (L1 output - 1)"
+                );
+            } else {
+                assert!(
+                    LS_L2_IN == LS_L1_OUT - 1,
+                    "ClippedReLU LayerStacks L2 input must be L1 output - 1"
+                );
+            }
             assert!(
                 LS_L2_PADDED_INPUT == super::layers::padded_input(LS_L2_IN),
                 "LayerStacks L2 padded input must match padded_input(L2_IN)"
+            );
+            assert!(
+                LS_L3_PADDED_INPUT == super::layers::padded_input(LS_L3_OUT),
+                "LayerStacks L3 padded input must match padded_input(L3_OUT)"
             );
         }
         Self {
@@ -100,8 +123,8 @@ impl<
     pub fn propagate(&self, input: &[u8; L1]) -> i32 {
         let mut l1_out = [0i32; LS_L1_OUT];
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_out = [0i32; LS_L3_OUT];
+        let mut l2_relu = Aligned([0u8; LS_L3_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
         // L1: L1 → LS_L1_OUT
@@ -111,16 +134,19 @@ impl<
         // l1_skip は最後の 1 要素、残り main_dim 要素を L2 入力へ変換する。
         let l1_skip = l1_out[Self::MAIN_DIM];
 
-        // main_dim 要素に SqrClippedReLU と ClippedReLU を適用して連結する。
-        // SqrClippedReLU: min(127, (input^2) >> 19)
-        // ClippedReLU:    clamp(input >> 6, 0, 127)
-        l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        if USE_SQR_CONCAT {
+            // v102 系: main_dim 要素に SqrClippedReLU と ClippedReLU を適用して連結する。
+            l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        } else {
+            // ClippedReLU-only 系: main_dim 要素をそのまま L2 入力へ渡す。
+            l1_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        }
 
-        // L2: LS_L2_IN → 32
+        // L2: LS_L2_IN → LS_L3_OUT
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
-        // Output: 32 → 1
+        // Output: LS_L3_OUT → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
@@ -134,21 +160,25 @@ impl<
     pub fn propagate_with_diagnostics(&self, input: &[u8; L1]) -> (i32, [i32; LS_L1_OUT], i32) {
         let mut l1_out = [0i32; LS_L1_OUT];
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_out = [0i32; LS_L3_OUT];
+        let mut l2_relu = Aligned([0u8; LS_L3_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
         self.l1.propagate(input, &mut l1_out);
 
         // Split: [main_dim, 1]
         let l1_skip = l1_out[Self::MAIN_DIM];
-        l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        if USE_SQR_CONCAT {
+            l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        } else {
+            l1_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+        }
 
-        // L2: LS_L2_IN → 32
+        // L2: LS_L2_IN → LS_L3_OUT
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
-        // Output: 32 → 1
+        // Output: LS_L3_OUT → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
@@ -163,7 +193,19 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> Default for LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
+> Default
+    for LayerStackBucket<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+    >
 {
     fn default() -> Self {
         Self::new()
@@ -184,9 +226,22 @@ pub struct LayerStacks<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
 > {
     /// `num_buckets` 個の bucket。長さは net file の `num_buckets` で決まる。
-    pub buckets: Vec<LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>>,
+    pub buckets: Vec<
+        LayerStackBucket<
+            L1,
+            LS_L1_OUT,
+            LS_L2_IN,
+            LS_L2_PADDED_INPUT,
+            LS_L3_OUT,
+            LS_L3_PADDED_INPUT,
+            USE_SQR_CONCAT,
+        >,
+    >,
 }
 
 impl<
@@ -194,7 +249,19 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
+>
+    LayerStacks<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+    >
 {
     /// 新規作成 (default `DEFAULT_NUM_BUCKETS` 個の bucket をゼロ初期化)
     pub fn new() -> Self {
@@ -272,7 +339,19 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> Default for LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L3_OUT: usize,
+    const LS_L3_PADDED_INPUT: usize,
+    const USE_SQR_CONCAT: bool,
+> Default
+    for LayerStacks<
+        L1,
+        LS_L1_OUT,
+        LS_L2_IN,
+        LS_L2_PADDED_INPUT,
+        LS_L3_OUT,
+        LS_L3_PADDED_INPUT,
+        USE_SQR_CONCAT,
+    >
 {
     fn default() -> Self {
         Self::new()
@@ -326,17 +405,32 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
     }
 }
 
-/// L2→Output activation: ClippedReLU（32要素 i32 → u8）
+/// ClippedReLU-only LayerStack の L1→L2 activation。
+///
+/// `main_dim = LS_L1_OUT - 1` とし、最後の 1 要素は skip connection として扱う。
+#[inline]
+fn l1_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>(
+    l1_out: &[i32; LS_L1_OUT],
+    l2_input: &mut [u8],
+) {
+    let main_dim = LS_L1_OUT - 1;
+    debug_assert_eq!(LS_L2_IN, main_dim);
+    for (i, &val) in l1_out.iter().enumerate().take(main_dim) {
+        l2_input[i] = (val >> 6).clamp(0, 127) as u8;
+    }
+}
+
+/// L2→Output activation: ClippedReLU（LS_L3_OUT 要素 i32 → u8）
 ///
 /// clamp(input >> 6, 0, 127)
 #[inline]
-fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
+fn clipped_relu_i32_to_u8<const LS_L3_OUT: usize>(input: &[i32; LS_L3_OUT], output: &mut [u8]) {
     // AVX2: 32 i32 → 32 u8（8要素ずつ4回）
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
         // SAFETY:
-        // - input は 32 要素（NNUE_PYTORCH_L3）
-        // - output は OUTPUT_PADDED_INPUT(=32) 要素
+        // - input は LS_L3_OUT 要素
+        // - output は padded_input(LS_L3_OUT) 要素以上
         // - >>6 + clamp(0,127) の結果は [0, 127] → u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -346,8 +440,8 @@ fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
             let in_ptr = input.as_ptr();
             let out_ptr = output.as_mut_ptr();
 
-            // 8要素ずつ4回 = 32要素
-            for chunk in 0..4 {
+            // 8要素ずつ処理。LS_L3_OUT が 32/64 どちらでも同じループを使う。
+            for chunk in 0..(LS_L3_OUT / 8) {
                 let offset = chunk * 8;
                 let v = _mm256_loadu_si256(in_ptr.add(offset) as *const __m256i);
                 let shifted = _mm256_srai_epi32(v, 6);
@@ -644,7 +738,7 @@ mod tests {
     use super::*;
     use crate::nnue::accumulator::Aligned;
     use crate::nnue::constants::{
-        LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, NNUE_PYTORCH_L1,
+        LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, NNUE_PYTORCH_L1, NNUE_PYTORCH_L3,
     };
     use crate::nnue::layers::ClippedReLU;
 
@@ -654,11 +748,26 @@ mod tests {
     const TEST_MAIN_DIM: usize = TEST_LS_L1_OUT - 1;
     const TEST_LS_L2_IN: usize = LAYER_STACK_16X32_L2_IN;
     const TEST_LS_L2_PADDED_INPUT: usize = 32;
+    const TEST_LS_L3_PADDED_INPUT: usize = 32;
 
-    type TestLayerStackBucket =
-        LayerStackBucket<TEST_L1, TEST_LS_L1_OUT, TEST_LS_L2_IN, TEST_LS_L2_PADDED_INPUT>;
-    type TestLayerStacks =
-        LayerStacks<TEST_L1, TEST_LS_L1_OUT, TEST_LS_L2_IN, TEST_LS_L2_PADDED_INPUT>;
+    type TestLayerStackBucket = LayerStackBucket<
+        TEST_L1,
+        TEST_LS_L1_OUT,
+        TEST_LS_L2_IN,
+        TEST_LS_L2_PADDED_INPUT,
+        NNUE_PYTORCH_L3,
+        TEST_LS_L3_PADDED_INPUT,
+        true,
+    >;
+    type TestLayerStacks = LayerStacks<
+        TEST_L1,
+        TEST_LS_L1_OUT,
+        TEST_LS_L2_IN,
+        TEST_LS_L2_PADDED_INPUT,
+        NNUE_PYTORCH_L3,
+        TEST_LS_L3_PADDED_INPUT,
+        true,
+    >;
 
     #[test]
     fn test_layer_stack_bucket_new() {
@@ -961,7 +1070,7 @@ mod tests {
             let mut l2_out = [0i32; NNUE_PYTORCH_L3];
             bucket.l2.propagate(&l2_input.0, &mut l2_out);
 
-            let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+            let mut l2_relu = Aligned([0u8; TEST_LS_L3_PADDED_INPUT]);
             for (dst, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
                 *dst = (val >> 6).clamp(0, 127) as u8;
             }
@@ -987,7 +1096,7 @@ mod tests {
         }
 
         let output_biases = [123i32; 1];
-        let mut output_weights = vec![0i8; OUTPUT_PADDED_INPUT];
+        let mut output_weights = vec![0i8; TEST_LS_L3_PADDED_INPUT];
         for (i, weight) in output_weights.iter_mut().enumerate() {
             *weight = ((i as i32 % 5) - 2) as i8;
         }
@@ -1005,8 +1114,8 @@ mod tests {
         let mut l2_input_ref = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
         let mut l2_sqr = [0u8; TEST_LS_L1_OUT];
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu_opt = Aligned([0u8; OUTPUT_PADDED_INPUT]);
-        let mut l2_relu_ref = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_relu_opt = Aligned([0u8; TEST_LS_L3_PADDED_INPUT]);
+        let mut l2_relu_ref = Aligned([0u8; TEST_LS_L3_PADDED_INPUT]);
 
         bucket.l1.propagate(&input.0, &mut l1_out);
         ClippedReLU::<TEST_LS_L1_OUT>::propagate(&l1_out, &mut l1_relu);

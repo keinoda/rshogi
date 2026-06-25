@@ -186,6 +186,21 @@ pub const LAYER_STACK_8X32_L1_OUT: usize = LAYER_STACK_8X32_MAIN_DIM + 1; // 8
 /// LayerStacks 8x32 バリアントの L2層入力次元数（sqr 7 + crelu 7 = 14）
 pub const LAYER_STACK_8X32_L2_IN: usize = LAYER_STACK_8X32_MAIN_DIM * 2; // 14
 
+/// ClippedReLU-only LayerStacks 8x64 バリアントの main 次元数。
+///
+/// 一部の legacy K3K3 系 header は `7<-2048` と表記するが、ファイル上は
+/// main 7 + skip 1 の 8 出力を持つ。
+pub const LAYER_STACK_8X64_MAIN_DIM: usize = 7;
+
+/// ClippedReLU-only LayerStacks 8x64 バリアントの L1層出力次元数（main 7 + skip 1 = 8）
+pub const LAYER_STACK_8X64_L1_OUT: usize = LAYER_STACK_8X64_MAIN_DIM + 1; // 8
+
+/// ClippedReLU-only LayerStacks 8x64 バリアントの L2層入力次元数（crelu 7 = 7）
+pub const LAYER_STACK_8X64_L2_IN: usize = LAYER_STACK_8X64_MAIN_DIM; // 7
+
+/// ClippedReLU-only LayerStacks 8x64 バリアントの L2層出力次元数
+pub const LAYER_STACK_8X64_L3_OUT: usize = 64;
+
 /// nnue-pytorch の隠れ層重みスケール
 pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;
 

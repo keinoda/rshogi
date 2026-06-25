@@ -156,6 +156,66 @@ pub struct ParsedArchitecture {
     pub l3: usize,
 }
 
+/// LayerStacks bucket の L1->L2 活性化形式。
+///
+/// NNUE header の `AffineTransform[...]` だけでは、bucket 内部で skip 出力を
+/// 1 本持つことや、L1 出力の main 部分を `sqr+crelu` 連結するか `crelu`
+/// 単独にするかを表現しきれない。LayerStacks reader はこの値で
+/// 登録済み実装へ dispatch する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerStackHiddenActivation {
+    /// main_dim 要素を `SqrClippedReLU + ClippedReLU` に展開する。
+    SqrClippedReluConcat,
+    /// main_dim 要素を `ClippedReLU` のみで L2 に渡す。
+    ClippedRelu,
+}
+
+impl LayerStackHiddenActivation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SqrClippedReluConcat => "sqr_clipped_relu_concat",
+            Self::ClippedRelu => "clipped_relu",
+        }
+    }
+}
+
+/// LayerStacks bucket 選択方式の header 由来 hint。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerStackBucketSelection {
+    /// USI option / engine default の bucket mode を使う。
+    Configured,
+    /// `{LayerStack=9}` 系の両玉 rank 3x3 bucket を使う。
+    KingRank9,
+}
+
+/// LayerStacks header から復元した実行用 descriptor。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParsedLayerStacksArchitecture {
+    /// Feature Transformer 種別。
+    pub feature_set: FeatureSet,
+    /// FeatureTransformer の片視点出力次元。
+    pub l1: usize,
+    /// Header 上の first hidden 出力次元。legacy 形式では skip を含まないことがある。
+    pub header_l2: usize,
+    /// Bucket 内部の first hidden 実格納次元（main + skip）。
+    pub layer1_output: usize,
+    /// L2 dense に入る main/activation 後次元。
+    pub layer2_input: usize,
+    /// Bucket 内部の second hidden 出力次元。
+    pub l3: usize,
+    /// L1->L2 の activation 形。
+    pub hidden_activation: LayerStackHiddenActivation,
+    /// Bucket 選択方式。
+    pub bucket_selection: LayerStackBucketSelection,
+}
+
+impl ParsedLayerStacksArchitecture {
+    /// 登録済み LayerStacks 実装の dispatch key。
+    pub fn dispatch_key(self) -> (usize, usize, usize, LayerStackHiddenActivation) {
+        (self.l1, self.layer1_output, self.l3, self.hidden_activation)
+    }
+}
+
 /// FeatureSet 判定に必要な入力次元を抽出
 pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
     let features_key = "Features=";
@@ -197,6 +257,10 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     }
     // Threat= は LayerStacks 専用マーカ
     if arch_str.contains("Threat=") {
+        return Ok(FeatureSet::LayerStacks);
+    }
+    // YaneuraOu SFNNWithoutPsqt 系は `{LayerStack=9}` で 9-bucket K3K3 を示す。
+    if arch_str.contains("LayerStack=") {
         return Ok(FeatureSet::LayerStacks);
     }
 
@@ -267,6 +331,168 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     Err("Unknown feature set in arch string.".to_string())
 }
 
+/// LayerStacks の FT 種別を header から判定する。
+///
+/// 通常の `parse_feature_set_from_arch` は mixed activation や `LayerStack=`
+/// marker を見た時点で `FeatureSet::LayerStacks` を返す。LayerStacks reader では
+/// その内側の FT 実装も必要になるため、`Features=` token と入力次元を優先して
+/// 具体的な FT を復元する。
+pub fn parse_layer_stacks_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
+    use super::constants::{
+        HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS, HALFKA_HM_SPLIT_DIMENSIONS,
+        HALFKA_MERGED_DIMENSIONS,
+    };
+
+    if let Some(name) = parse_feature_set_keyword(arch_str) {
+        match name {
+            "HalfKP" => return Ok(FeatureSet::HalfKP),
+            "HalfKaSplit" | "HalfKA" => {
+                let input_dim = parse_feature_input_dimensions(arch_str).ok_or_else(|| {
+                    format!("{name} architecture is missing input dimensions in arch string.")
+                })?;
+                return match input_dim {
+                    HALFKA_DIMENSIONS => Ok(FeatureSet::HalfKaSplit),
+                    HALFKA_MERGED_DIMENSIONS => Ok(FeatureSet::HalfKaMerged),
+                    HALFKA_HM_DIMENSIONS => Ok(FeatureSet::HalfKaHmMerged),
+                    HALFKA_HM_SPLIT_DIMENSIONS => Ok(FeatureSet::HalfKaHmSplit),
+                    _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
+                };
+            }
+            "HalfKaMerged" | "HalfKA_merged" => return Ok(FeatureSet::HalfKaMerged),
+            "HalfKaHmSplit" | "HalfKA_hm_split" => return Ok(FeatureSet::HalfKaHmSplit),
+            "HalfKaHmMerged" | "HalfKA_hm" => return Ok(FeatureSet::HalfKaHmMerged),
+            "LayerStacks" | "" => return Ok(FeatureSet::LayerStacks),
+            other => return Err(format!("Unknown LayerStacks feature set keyword: {other}")),
+        }
+    }
+
+    Ok(FeatureSet::LayerStacks)
+}
+
+fn parse_affine_layers(arch_str: &str) -> Vec<(usize, usize)> {
+    let mut layers = Vec::new();
+    let pattern = "AffineTransform[";
+    let mut search_start = 0;
+
+    while let Some(start) = arch_str[search_start..].find(pattern) {
+        let abs_start = search_start + start + pattern.len();
+        if let Some(end) = arch_str[abs_start..].find(']') {
+            let content = &arch_str[abs_start..abs_start + end];
+            if let Some(arrow_idx) = content.find("<-") {
+                let out_str = &content[..arrow_idx];
+                let in_str = &content[arrow_idx + 2..];
+                if let (Ok(out), Ok(inp)) = (out_str.parse::<usize>(), in_str.parse::<usize>()) {
+                    layers.push((out, inp));
+                }
+            }
+            search_start = abs_start + end;
+        } else {
+            break;
+        }
+    }
+
+    layers
+}
+
+/// LayerStacks アーキテクチャ文字列を実行用 descriptor に変換する。
+pub fn parse_layer_stacks_architecture(
+    arch_str: &str,
+) -> Result<ParsedLayerStacksArchitecture, String> {
+    let feature_set = parse_layer_stacks_feature_set_from_arch(arch_str)?;
+    let (l1, _, _) = parse_arch_dimensions(arch_str);
+    if l1 == 0 {
+        return Err("LayerStacks architecture is missing FT output dimension.".to_string());
+    }
+
+    let mut layers = parse_affine_layers(arch_str);
+    layers.reverse();
+    if layers.len() < 3 {
+        return Err(format!(
+            "LayerStacks architecture needs at least 3 AffineTransform layers, got {}",
+            layers.len()
+        ));
+    }
+
+    let first = layers[0];
+    let second = layers[1];
+    let output = layers[2];
+    if first.1 != l1 * 2 {
+        return Err(format!(
+            "LayerStacks first affine input mismatch: header={} expected={}",
+            first.1,
+            l1 * 2
+        ));
+    }
+    if output.0 != 1 || output.1 != second.0 {
+        return Err(format!(
+            "LayerStacks output layer mismatch: output={output:?}, second={second:?}"
+        ));
+    }
+
+    let second_input = second.1;
+    let sqr_token = format!("SqrClippedReLU[{second_input}]");
+    let crelu_token = format!("ClippedReLU[{second_input}]");
+    let hidden_activation = if arch_str.contains(&sqr_token) {
+        LayerStackHiddenActivation::SqrClippedReluConcat
+    } else if arch_str.contains(&crelu_token) {
+        LayerStackHiddenActivation::ClippedRelu
+    } else {
+        return Err(format!("LayerStacks activation token for input {second_input} was not found"));
+    };
+
+    let (layer1_output, layer2_input) = match hidden_activation {
+        LayerStackHiddenActivation::SqrClippedReluConcat => {
+            if !second_input.is_multiple_of(2) {
+                return Err(format!(
+                    "SqrClippedReLU concat input must be even, got {second_input}"
+                ));
+            }
+            let main_dim = second_input / 2;
+            if first.0 != main_dim + 1 {
+                return Err(format!(
+                    "LayerStacks skip layout mismatch: first_out={} expected main_dim+1={}",
+                    first.0,
+                    main_dim + 1
+                ));
+            }
+            (first.0, second_input)
+        }
+        LayerStackHiddenActivation::ClippedRelu => {
+            // 一部の legacy header は skip 出力を first affine の表記に含めない。
+            // 既に含んだ形式も受けるため、main_dim または main_dim+1 を許容する。
+            let main_dim = second_input;
+            let stored = if first.0 == main_dim {
+                main_dim + 1
+            } else if first.0 == main_dim + 1 {
+                first.0
+            } else {
+                return Err(format!(
+                    "LayerStacks clipped-ReLU skip layout mismatch: first_out={} main_dim={main_dim}",
+                    first.0
+                ));
+            };
+            (stored, second_input)
+        }
+    };
+
+    let bucket_selection = if arch_str.contains("LayerStack=") {
+        LayerStackBucketSelection::KingRank9
+    } else {
+        LayerStackBucketSelection::Configured
+    };
+
+    Ok(ParsedLayerStacksArchitecture {
+        feature_set,
+        l1,
+        header_l2: first.0,
+        layer1_output,
+        layer2_input,
+        l3: second.0,
+        hidden_activation,
+        bucket_selection,
+    })
+}
+
 /// アーキテクチャ文字列から L1, L2, L3 を抽出
 ///
 /// 戻り値: (L1, L2, L3)
@@ -294,26 +520,7 @@ pub fn parse_arch_dimensions(arch_str: &str) -> (usize, usize, usize) {
     // L2, L3: AffineTransform[OUT<-IN] パターンを探す
     // 例: AffineTransform[8<-1024] → L2=8
     //     AffineTransform[96<-8] → L3=96
-    let mut layers: Vec<(usize, usize)> = Vec::new();
-    let pattern = "AffineTransform[";
-
-    let mut search_start = 0;
-    while let Some(start) = arch_str[search_start..].find(pattern) {
-        let abs_start = search_start + start + pattern.len();
-        if let Some(end) = arch_str[abs_start..].find(']') {
-            let content = &arch_str[abs_start..abs_start + end];
-            if let Some(arrow_idx) = content.find("<-") {
-                let out_str = &content[..arrow_idx];
-                let in_str = &content[arrow_idx + 2..];
-                if let (Ok(out), Ok(inp)) = (out_str.parse::<usize>(), in_str.parse::<usize>()) {
-                    layers.push((out, inp));
-                }
-            }
-            search_start = abs_start + end;
-        } else {
-            break;
-        }
-    }
+    let mut layers = parse_affine_layers(arch_str);
 
     // 1. まず bullet-shogi 形式 "l2=8,l3=96" を優先的にパース
     //    明示的に指定された値を尊重する
@@ -1429,6 +1636,43 @@ mod tests {
         // 何も取得できない場合
         assert_eq!(parse_arch_dimensions("unknown"), (0, 0, 0));
         assert_eq!(parse_arch_dimensions(""), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_layer_stacks_architecture_sqr_concat() {
+        let arch = "Features=HalfKaHmMerged(Friend)[73305->1536x2],Network=AffineTransform\
+                    [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
+                    AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
+        let parsed = parse_layer_stacks_architecture(arch).unwrap();
+        assert_eq!(parsed.feature_set, FeatureSet::HalfKaHmMerged);
+        assert_eq!(parsed.l1, 1536);
+        assert_eq!(parsed.header_l2, 16);
+        assert_eq!(parsed.layer1_output, 16);
+        assert_eq!(parsed.layer2_input, 30);
+        assert_eq!(parsed.l3, 32);
+        assert_eq!(parsed.hidden_activation, LayerStackHiddenActivation::SqrClippedReluConcat);
+        assert_eq!(parsed.bucket_selection, LayerStackBucketSelection::Configured);
+        assert_eq!(
+            parsed.dispatch_key(),
+            (1536, 16, 32, LayerStackHiddenActivation::SqrClippedReluConcat)
+        );
+    }
+
+    #[test]
+    fn test_parse_layer_stacks_architecture_clipped_kingrank9() {
+        let arch = "ModelType=SFNNWithoutPsqt;Features=HalfKA(Friend)[131949->1024x2],\
+                    Network=AffineTransform[1<-64](ClippedReLU[64](AffineTransform[64<-7](\
+                    ClippedReLU[7](AffineTransform[7<-2048](InputSlice[2048(0:2048)]))))){LayerStack=9}";
+        let parsed = parse_layer_stacks_architecture(arch).unwrap();
+        assert_eq!(parsed.feature_set, FeatureSet::HalfKaMerged);
+        assert_eq!(parsed.l1, 1024);
+        assert_eq!(parsed.header_l2, 7);
+        assert_eq!(parsed.layer1_output, 8);
+        assert_eq!(parsed.layer2_input, 7);
+        assert_eq!(parsed.l3, 64);
+        assert_eq!(parsed.hidden_activation, LayerStackHiddenActivation::ClippedRelu);
+        assert_eq!(parsed.bucket_selection, LayerStackBucketSelection::KingRank9);
+        assert_eq!(parsed.dispatch_key(), (1024, 8, 64, LayerStackHiddenActivation::ClippedRelu));
     }
 
     // =============================================================================

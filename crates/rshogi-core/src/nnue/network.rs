@@ -128,12 +128,15 @@ pub fn parse_nnue_architecture(value: &str) -> Option<NNUEArchitectureOverride> 
 pub enum LayerStackBucketMode {
     /// 進行度方式(KP-absolute): YaneuraOu 互換 progress.bin で 8 バケットへ分割（bucket8は未使用）
     Progress8KPAbs = 4,
+    /// 両玉の相対段を 3x3 に分割する legacy K3K3/KingRank9 方式。
+    KingRank9 = 5,
 }
 
 impl LayerStackBucketMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Progress8KPAbs => "progress8kpabs",
+            Self::KingRank9 => "kingrank9",
         }
     }
 }
@@ -213,9 +216,10 @@ pub fn set_fv_scale_override(value: i32) {
 
 /// LayerStacks bucket mode を取得
 pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
-    // 現状は Progress8KPAbs のみ。int mapping は将来のモード追加用。
-    let _ = LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed);
-    LayerStackBucketMode::Progress8KPAbs
+    match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
+        x if x == LayerStackBucketMode::KingRank9 as i32 => LayerStackBucketMode::KingRank9,
+        _ => LayerStackBucketMode::Progress8KPAbs,
+    }
 }
 
 /// LayerStacks bucket mode を設定
@@ -427,24 +431,7 @@ impl NNUENetwork {
                             _ => None,
                         };
                         reader.seek(SeekFrom::Start(0))?;
-                        let (l1_from_arch, l2_from_arch, l3_from_arch) =
-                            super::spec::parse_arch_dimensions(&arch_str);
-                        let l1 = if l1_from_arch == 0 {
-                            1536
-                        } else {
-                            l1_from_arch
-                        };
-                        let (l2, l3) = match (l2_from_arch, l3_from_arch) {
-                            (0, 0) => (16, 32),
-                            dims => dims,
-                        };
-                        let network = LayerStacksNetwork::read_with_options(
-                            reader,
-                            l1,
-                            l2,
-                            l3,
-                            psqt_override,
-                        )?;
+                        let network = LayerStacksNetwork::read_with_options(reader, psqt_override)?;
                         return Ok(Self::LayerStacks(network));
                     }
                     #[cfg(not(feature = "layerstack-arch"))]
@@ -546,6 +533,21 @@ impl NNUENetwork {
         #[cfg(not(feature = "layerstack-arch"))]
         {
             false
+        }
+    }
+
+    /// LayerStacks の場合、ロード済み net が実際に使う bucket mode を返す。
+    pub fn layer_stack_bucket_mode(&self) -> Option<LayerStackBucketMode> {
+        #[cfg(feature = "layerstack-arch")]
+        {
+            match self {
+                Self::LayerStacks(net) => Some(net.bucket_mode()),
+                _ => None,
+            }
+        }
+        #[cfg(not(feature = "layerstack-arch"))]
+        {
+            None
         }
     }
 
@@ -874,6 +876,7 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
 pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "progress8kpabs" => Some(LayerStackBucketMode::Progress8KPAbs),
+        "kingrank9" | "k3k3" => Some(LayerStackBucketMode::KingRank9),
         _ => None,
     }
 }
@@ -2113,7 +2116,11 @@ mod tests {
         assert_eq!(parse_layer_stack_bucket_mode("unknown"), None);
         assert_eq!(parse_layer_stack_bucket_mode("progress8"), None);
         assert_eq!(parse_layer_stack_bucket_mode("progress8gikou"), None);
-        assert_eq!(parse_layer_stack_bucket_mode("kingrank9"), None);
+        assert_eq!(
+            parse_layer_stack_bucket_mode("kingrank9"),
+            Some(LayerStackBucketMode::KingRank9)
+        );
+        assert_eq!(parse_layer_stack_bucket_mode("k3k3"), Some(LayerStackBucketMode::KingRank9));
         assert_eq!(parse_layer_stack_bucket_mode("ply9"), None);
     }
 
