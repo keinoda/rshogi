@@ -27,6 +27,12 @@ marker として `vX.Y.Z` を打つ。crates.io 上の `rshogi-core` は別系�
 - LayerStack `1024x16x32` (FT_OUT=1024, L1=16, L2=32) size variant を追加。
   preset `edition-layerstacks-halfka_hm_merged-1024x16x32-none`。L1=16 系で既存
   const generic を流用するため inference kernel の追加なし。
+- LayerStack `2048x16x64` / `3072x16x64` (FT_OUT=2048/3072, L1=16, L2=64) size
+  variant を追加。preset は各 `-none` / `-psqt`
+  (`edition-layerstacks-halfka_hm_merged-{2048,3072}x16x64-{none,psqt}`)。
+  L2 出力幅を const generic `LS_L3` (既定 32) として一般化し、tatara
+  `--ft-out 2048/3072 --l1 16 --l2 64` で学習した net をロード可能にした。
+  L0≠1536 のため `nnue-progress-diff` は非対応 (build.rs で reject)。
 
 ## v1.1.0 — 2026-06-02
 

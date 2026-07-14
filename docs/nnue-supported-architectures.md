@@ -98,6 +98,8 @@ rshogi はファイルサイズからアーキテクチャを自動検出しま�
 | 768 | 8 | 32 | 8x32 バリアント (`layerstacks-768x8x32`) |
 | 512 | 16 | 32 | 16x32 バリアント (`layerstacks-512x16x32`) |
 | 1024 | 16 | 32 | 16x32 バリアント (`layerstacks-1024x16x32`) |
+| 2048 | 16 | 64 | 16x64 バリアント (`layerstacks-2048x16x64`、L2 出力 64) |
+| 3072 | 16 | 64 | 16x64 バリアント (`layerstacks-3072x16x64`、L2 出力 64) |
 
 大会向けビルドでは、dispatch overhead を避けるため exact architecture feature を 1 つだけ有効化することを推奨する。
 

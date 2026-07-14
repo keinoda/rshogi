@@ -171,6 +171,32 @@ fn progress_diff_with_1024_rejected() {
 }
 
 #[test]
+fn progress_diff_with_2048_rejected() {
+    let has = lookup(&[
+        "mode-specific",
+        "layerstack-arch",
+        "layerstacks-2048x16x64",
+        "ft-halfka_hm_merged",
+        "nnue-progress-diff",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("nnue-progress-diff"));
+}
+
+#[test]
+fn progress_diff_with_3072_rejected() {
+    let has = lookup(&[
+        "mode-specific",
+        "layerstack-arch",
+        "layerstacks-3072x16x64",
+        "ft-halfka_hm_merged",
+        "nnue-progress-diff",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("nnue-progress-diff"));
+}
+
+#[test]
 fn progress_diff_with_1536x32x32_ok() {
     let has = lookup(&[
         "mode-specific",

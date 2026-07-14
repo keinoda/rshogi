@@ -177,6 +177,16 @@ pub const LAYER_STACK_32X32_MAIN_DIM: usize = LAYER_STACK_32X32_L1_OUT - 1; // 3
 /// LayerStacks 32x32 バリアントの L2層入力次元数（sqr 31 + crelu 31 = 62）
 pub const LAYER_STACK_32X32_L2_IN: usize = LAYER_STACK_32X32_MAIN_DIM * 2; // 62
 
+/// LayerStacks 16x64 バリアント（L2 出力 64、tatara `--l1 16 --l2 64`）の L1層出力次元数。
+/// L1 側の形状 (L1_OUT / L2_IN) は 16x32 と同一で、L2 出力幅 (LS_L3) のみ 64 になる。
+pub const LAYER_STACK_16X64_L1_OUT: usize = LAYER_STACK_16X32_L1_OUT; // 16
+
+/// LayerStacks 16x64 バリアントの L2層入力次元数（sqr 15 + crelu 15 = 30）
+pub const LAYER_STACK_16X64_L2_IN: usize = LAYER_STACK_16X32_L2_IN; // 30
+
+/// LayerStacks 16x64 バリアントの L2層出力次元数（= LS_L3）
+pub const LAYER_STACK_16X64_L3: usize = 64;
+
 /// LayerStacks 8x32 バリアントの main 次元数
 pub const LAYER_STACK_8X32_MAIN_DIM: usize = 7;
 

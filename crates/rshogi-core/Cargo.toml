@@ -99,6 +99,8 @@ layerstacks-768x16x32  = []
 layerstacks-768x8x32   = []
 layerstacks-512x16x32  = []
 layerstacks-1024x16x32 = []
+layerstacks-2048x16x64 = []
+layerstacks-3072x16x64 = []
 
 # LayerStack 拡張 slot (psqt / threat)
 # - nnue-psqt:   AccumulatorLayerStacks に psqt_accumulation を含める。PSQT モデル読み込み可。
@@ -147,7 +149,7 @@ edition-universal = [
   "mode-universal",
   "layerstack-arch", "halfkx-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32",
+  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32", "layerstacks-2048x16x64", "layerstacks-3072x16x64",
   "nnue-psqt", "nnue-threat",
   "halfkx-activation-crelu", "halfkx-activation-screlu", "halfkx-activation-pairwise",
 ]
@@ -165,7 +167,7 @@ edition-layerstacks             = ["edition-layerstacks-any-any-any"]
 edition-layerstacks-any-any-any = [
   "mode-family", "layerstack-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32",
+  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32", "layerstacks-2048x16x64", "layerstacks-3072x16x64",
   "nnue-psqt", "nnue-threat",
 ]
 
@@ -228,6 +230,21 @@ edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class = [
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
   "threat-profile-same-class-major-pawn",
+]
+# LayerStack specific (2048x16x64 / 3072x16x64、none / psqt)。拡大 L0 + L3=64
+# (tatara `--ft-out 2048/3072 --l1 16 --l2 64` net 用)。
+# L0≠1536 系のため nnue-progress-diff は含めない (build.rs ポリシー、性能未計測)。
+edition-layerstacks-halfka_hm_merged-2048x16x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2048x16x64",
+]
+edition-layerstacks-halfka_hm_merged-2048x16x64-psqt = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2048x16x64", "nnue-psqt",
+]
+edition-layerstacks-halfka_hm_merged-3072x16x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x64",
+]
+edition-layerstacks-halfka_hm_merged-3072x16x64-psqt = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x64", "nnue-psqt",
 ]
 edition-layerstacks-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",

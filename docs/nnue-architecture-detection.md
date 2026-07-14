@@ -167,6 +167,8 @@ LayerStacks は Feature Transformer が LEB128 圧縮されており、HalfKP/Ha
 - `layerstacks-768x8x32`
 - `layerstacks-512x16x32`
 - `layerstacks-1024x16x32`
+- `layerstacks-2048x16x64`
+- `layerstacks-3072x16x64`
 
 大会向け専用ビルドでは、必要な feature を 1 つだけ有効化して dispatch を最小化する。
 
