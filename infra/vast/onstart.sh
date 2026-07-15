@@ -12,9 +12,10 @@
 #   SHOGITEST_BRANCH : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)
 #   HF_DATASET       : 既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
 #   SKIP_HF          : 1 で HF プールの DL をスキップ (蒸留済みデータのみで作業する場合)
-#   GIGAFILE_URLS    : gigafile.nu の URL (空白区切りで複数可)。指定時は蒸留済み教師データを
-#                      $SHOGI_DATA/teachers/distilled/ へダウンロードし、zip を展開・検証後に
-#                      削除する (ピークディスク削減。展開は extract_stored_zips.py)
+#   GIGAFILE_URLS    : gigafile.nu の URL。複数は「カンマ区切り」推奨 (vast の環境変数欄は
+#                      スペースを含む値を quote なしでは受け付けない)。スペース区切りも可。
+#                      指定時は蒸留済み教師データを $SHOGI_DATA/teachers/distilled/ へ
+#                      ダウンロードし、zip を展開・検証後に削除する (extract_stored_zips.py)
 #   GIGAFILE_DLKEY   : gigafile のダウンロードキー (設定されている場合のみ)
 #
 # 教師データは常に全量 (34 shard / 679GB) をダウンロードする。実績あるデータセットで
@@ -37,6 +38,13 @@ RSHOGI_BRANCH=${RSHOGI_BRANCH:-claude/busy-faraday-umwgl8}
 TATARA_BRANCH=${TATARA_BRANCH:-main}
 SHOGITEST_BRANCH=${SHOGITEST_BRANCH:-claude/nightly-toolchain-pin}
 HF_DATASET=${HF_DATASET:-washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique}
+
+# GIGAFILE_URLS の正規化: カンマ区切り → スペース区切りへ変換し、UI 経由で値に
+# 混入しがちな引用符も除去する (下の tmux セッションが env 経由で参照するため export)
+if [ -n "${GIGAFILE_URLS:-}" ]; then
+    GIGAFILE_URLS=$(printf '%s' "$GIGAFILE_URLS" | tr -d '"' | tr -d "'" | tr ',' ' ')
+    export GIGAFILE_URLS
+fi
 
 mkdir -p "$SHOGI_DATA"/{teachers/pool,nnue,progress} \
          "$WORK"/{pilot,logs,book,trt_g0} "$WORK/pilot"/{rescored,logs}

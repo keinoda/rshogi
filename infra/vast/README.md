@@ -51,7 +51,7 @@ Change visibility）。vast.ai が匿名 pull できるようにするため。�
 | `TATARA_BRANCH` | tatara のブランチ | `main` |
 | `SHOGITEST_BRANCH` | shogitest のブランチ | `claude/nightly-toolchain-pin` |
 | `SKIP_HF` | `1` で HF プールの DL をスキップ（蒸留済みデータのみで作業する場合） | なし |
-| `GIGAFILE_URLS` | gigafile.nu の URL（空白区切りで複数可）。指定時は蒸留済み教師データを `$SHOGI_DATA/teachers/distilled/` へ DL → zip 展開・検証 → zip 削除まで自動実行（`gigafile_dl.sh` + `extract_stored_zips.py`、resume 対応）。**URL は repo に commit せず、テンプレートの環境変数でのみ渡す**（public repo のため） | なし |
+| `GIGAFILE_URLS` | gigafile.nu の URL。複数は**カンマ区切り**で指定（vast の環境変数欄はスペースを含む値を quote なしでは受け付けず "Invalid value" になる。スペース区切りを使う場合は値全体を `"..."` で囲む）。指定時は蒸留済み教師データを `$SHOGI_DATA/teachers/distilled/` へ DL → zip 展開・検証 → zip 削除まで自動実行（`gigafile_dl.sh` + `extract_stored_zips.py`、resume 対応）。**URL は repo に commit せず、テンプレートの環境変数でのみ渡す**（public repo のため） | なし |
 | `GIGAFILE_DLKEY` | gigafile のダウンロードキー | なし |
 
 HF の教師データ（元ラベルのプール）は**常に全量（34 shard / 679GB）を自動ダウンロード**する
