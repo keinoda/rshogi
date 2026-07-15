@@ -49,9 +49,9 @@ RUN wget -q -O /tmp/trt.tgz \
 # --- Rust toolchains (rshogi: stable 1.95.0 / tatara・shogitest: nightly-2026-04-03) ---
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain 1.95.0 --component rustfmt clippy \
+        | sh -s -- -y --default-toolchain 1.95.0 --component rustfmt --component clippy \
     && /opt/cargo/bin/rustup toolchain install nightly-2026-04-03 \
-        --component rustfmt clippy \
+        --component rustfmt --component clippy \
     && chmod -R a+rX /opt/rustup /opt/cargo
 
 # --- HuggingFace CLI (教師データ DL; hf_transfer で高速化) ---

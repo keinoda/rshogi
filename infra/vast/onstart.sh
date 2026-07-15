@@ -11,6 +11,10 @@
 #   TATARA_BRANCH    : 既定 main (net_to_yo 汎用化を使うなら claude/net-to-yo-dims-generic)
 #   SHOGITEST_BRANCH : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)
 #   HF_DATASET       : 既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
+#   SKIP_HF          : 1 で HF プールの DL をスキップ (蒸留済みデータのみで作業する場合)
+#   GIGAFILE_URLS    : gigafile.nu の URL (空白区切りで複数可)。指定時は蒸留済み教師データを
+#                      $SHOGI_DATA/teachers/distilled/ へダウンロードする
+#   GIGAFILE_DLKEY   : gigafile のダウンロードキー (設定されている場合のみ)
 #
 # 教師データは常に全量 (34 shard / 679GB) をダウンロードする。実績あるデータセットで
 # 全量使うことが確定しているため、shard 小出しで後から待つ時間を作らない。
@@ -67,12 +71,22 @@ if ! step_done repos; then
 fi
 
 # ---------- 2. 教師データ DL (全量、tmux で並列) ----------
-if ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
+if [ "${SKIP_HF:-0}" != "1" ] && ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
     tmux new-session -d -s hfdl "hf download '$HF_DATASET' --repo-type dataset \
         --local-dir '$SHOGI_DATA/teachers/pool' \
         2>&1 | tee '$WORK/logs/hfdl.log'; \
         touch '$(marker hfdl)'"
     echo "[onstart] hf download started (full dataset)"
+fi
+
+# ---------- 2.3 蒸留済み教師データ (gigafile.nu、GIGAFILE_URLS 指定時) ----------
+# gigafile のリンクには保持期限があるため、受領したら速やかに落とすこと。
+if [ -n "${GIGAFILE_URLS:-}" ] && ! step_done gigafile && ! tmux has-session -t gigafile 2>/dev/null; then
+    mkdir -p "$SHOGI_DATA/teachers/distilled"
+    tmux new-session -d -s gigafile "( bash '$WORK/rshogi/infra/vast/gigafile_dl.sh' \
+        -o '$SHOGI_DATA/teachers/distilled' ${GIGAFILE_DLKEY:+-k \"\$GIGAFILE_DLKEY\"} \
+        \$GIGAFILE_URLS && touch '$(marker gigafile)' ) 2>&1 | tee '$WORK/logs/gigafile.log'; sleep 5"
+    echo "[onstart] gigafile download started"
 fi
 
 # ---------- 2.5 progress.bin (keinoda/yaneuraou sojo_tsec7 branch の source/ から取得) ----------

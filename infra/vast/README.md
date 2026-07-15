@@ -42,10 +42,14 @@ Change visibility）。vast.ai が匿名 pull できるようにするため。�
 | `RSHOGI_BRANCH` | rshogi のブランチ | `claude/busy-faraday-umwgl8` |
 | `TATARA_BRANCH` | tatara のブランチ | `main` |
 | `SHOGITEST_BRANCH` | shogitest のブランチ | `claude/nightly-toolchain-pin` |
+| `SKIP_HF` | `1` で HF プールの DL をスキップ（蒸留済みデータのみで作業する場合） | なし |
+| `GIGAFILE_URLS` | gigafile.nu の URL（空白区切りで複数可）。指定時は蒸留済み教師データを `$SHOGI_DATA/teachers/distilled/` へ DL（`gigafile_dl.sh` を使用、resume 対応） | なし |
+| `GIGAFILE_DLKEY` | gigafile のダウンロードキー | なし |
 
-教師データは**常に全量（34 shard / 679GB）を自動ダウンロード**する（実績あるデータセットで
-全量使用が確定しているため、shard 小出しはしない）。止める場合は `tmux kill-session -t hfdl`、
-再開は onstart 再実行か同コマンドで resume される。
+HF の教師データ（元ラベルのプール）は**常に全量（34 shard / 679GB）を自動ダウンロード**する
+（`SKIP_HF=1` で無効化可）。止める場合は `tmux kill-session -t hfdl`、
+再開は onstart 再実行か同コマンドで resume される。gigafile のリンクには**保持期限がある**ため、
+蒸留済みデータを受領したら速やかにダウンロードすること。
 
 ## 起動後の確認
 
