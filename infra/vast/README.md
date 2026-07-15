@@ -120,9 +120,21 @@ tmux new -d -s train "python3 $WORK/rshogi/infra/vast/staged_train.py \
 - ハーネス自体も冪等（同一コマンド再実行で続きから）。tatara 異常終了は
   resume で自動リトライ（`--retries`）
 
-**前提**: 学習 PSV は事前に全域シャッフルしておくこと（tatara の dataloader は
-シャッフルなしの逐次読み）。88 億全量なら `shuffle_psv --chunk-size` の一時領域
-込みで入力の 3 倍 ≈ 1.06TB を使うため、**シャッフルだけは 2TB ディスクで実施**する。
+**データ順序について**: tatara の dataloader はシャッフルなしの逐次読みだが、
+蒸留済み `dlsuisho_unique_*` は「全域シャッフル → 分割」で生成されており
+（ファイル間・ファイル内で ply / score / 勝敗分布が均質なことをサンプリングで
+確認済み）、**番号順の連結だけでシャッフル済みストリームとして使える**
+（再シャッフル不要）。ディスクの二重持ちを避けるには 1 ファイルずつ追記 + 削除で
+連結する（ピーク ≈ 全量 + 1 ファイル分）:
+
+```bash
+for f in $SHOGI_DATA/teachers/distilled/dlsuisho_unique_0*.bin; do
+  cat "$f" >> $SHOGI_DATA/teachers/distilled_88b.bin && rm "$f"
+done
+```
+
+別ソースの（順序性が不明な）PSV を使う場合は `shuffle_psv --chunk-size` での
+全域シャッフルが必要（一時領域込みで入力の 3 倍のディスク）。
 
 ## 注意
 
