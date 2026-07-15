@@ -151,13 +151,18 @@ if ! step_done build_rshogi && ! tmux has-session -t build_rshogi 2>/dev/null; t
 fi
 
 # ---------- 4. tatara build (tmux) ----------
+# 正規手順は 3 段 (tatara docs/setup.ja.md):
+#   1. setup-cuda-oxide.sh — kernel ビルドツール cargo-oxide を Cargo.lock の
+#      pin rev で install し、codegen backend cache も揃える
+#   2. build-kernels.sh    — GPU kernel (.ll) をビルド。GPU 世代は nvidia-smi で
+#      自動判定 (Turing のみ CUDA_OXIDE_TARGET=sm_75 を自動設定)
+#   3. cargo build         — host バイナリ
+# 2 を飛ばすと nnue-train が起動直後 (SB0) に kernel 不在で落ちる。
 if ! step_done build_tatara && ! tmux has-session -t build_tatara 2>/dev/null; then
-    # Turing (sm_75) のみ CUDA_OXIDE_TARGET 指定が必要 (tatara docs/setup.ja.md)
-    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
-    TARGET_ENV=""
-    if [ -n "$CC" ] && [ "$CC" -lt 80 ]; then TARGET_ENV="CUDA_OXIDE_TARGET=sm_75"; fi
     tmux new-session -d -s build_tatara "( cd '$WORK/tatara' && \
-        env $TARGET_ENV cargo build --release && \
+        bash scripts/setup-cuda-oxide.sh && \
+        bash scripts/build-kernels.sh && \
+        cargo build --release && \
         touch '$(marker build_tatara)'; echo exit=\$? ) 2>&1 | tee '$WORK/logs/build_tatara.log'; sleep 5"
     echo "[onstart] tatara build started"
 fi
