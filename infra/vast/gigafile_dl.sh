@@ -65,8 +65,9 @@ for url in "$@"; do
         echo "WARNING: 複数ファイルのまとめページのようです。単一ファイルページの URL を渡すこと" >&2
     fi
 
-    # 2. ファイル名 (id="dl" 要素のテキスト)。取れなければ file_id を使う
-    file_name=$(grep -oP 'id="dl"[^>]*>\s*\K[^<]+' "$page" | head -1 | sed 's/[[:space:]]*$//;s/^[[:space:]]*//')
+    # 2. ファイル名 (id="dl" 要素のテキスト)。実ページは要素内で改行するため、
+    #    1 行に潰してから抽出する (grep は行単位のため)。取れなければ file_id を使う
+    file_name=$(tr -d '\n\r' < "$page" | grep -oP 'id="dl"[^>]*>\s*\K[^<]+' | head -1 | sed 's/[[:space:]]*$//;s/^[[:space:]]*//')
     if [ -z "$file_name" ]; then
         echo "WARNING: ファイル名を取得できませんでした。ファイル ID を名前として使用します" >&2
         file_name="$file_id"
@@ -74,7 +75,14 @@ for url in "$@"; do
     safe_name=$(printf '%s' "$file_name" | tr '\\/:*?"<>|' '_')
     out_path="$OUTPUT_DIR/$safe_name"
 
-    size_text=$(grep -oP 'dl_size[^"]*"[^>]*>\s*\K[^<]+' "$page" | head -1 || true)
+    # 展開・検証済み (extract_stored_zips.py のスタンプ) なら再ダウンロードしない
+    if [ -f "${out_path}.extracted" ]; then
+        echo "展開済みスタンプあり、ダウンロードを skip: $safe_name"
+        rm -f "$jar" "$page"
+        continue
+    fi
+
+    size_text=$(tr -d '\n\r' < "$page" | grep -oP 'dl_size[^"]*"[^>]*>\s*\K[^<]+' | head -1 | sed 's/[[:space:]]*$//;s/^[[:space:]]*//' || true)
     echo "ファイル名: $file_name"
     [ -n "$size_text" ] && echo "サイズ: $size_text"
     echo "保存先: $out_path"

@@ -13,7 +13,8 @@
 #   HF_DATASET       : 既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
 #   SKIP_HF          : 1 で HF プールの DL をスキップ (蒸留済みデータのみで作業する場合)
 #   GIGAFILE_URLS    : gigafile.nu の URL (空白区切りで複数可)。指定時は蒸留済み教師データを
-#                      $SHOGI_DATA/teachers/distilled/ へダウンロードする
+#                      $SHOGI_DATA/teachers/distilled/ へダウンロードし、zip を展開・検証後に
+#                      削除する (ピークディスク削減。展開は extract_stored_zips.py)
 #   GIGAFILE_DLKEY   : gigafile のダウンロードキー (設定されている場合のみ)
 #
 # 教師データは常に全量 (34 shard / 679GB) をダウンロードする。実績あるデータセットで
@@ -81,11 +82,16 @@ fi
 
 # ---------- 2.3 蒸留済み教師データ (gigafile.nu、GIGAFILE_URLS 指定時) ----------
 # gigafile のリンクには保持期限があるため、受領したら速やかに落とすこと。
+# DL → zip 展開 (CRC/サイズ/40B 境界検証) → 検証済み zip の削除 まで自動で行う。
+# zip を 1 本ずつ展開後に消すので、ピークディスクは「zip 全量 + 展開 1 本分」(~450GB) に収まる。
 if [ -n "${GIGAFILE_URLS:-}" ] && ! step_done gigafile && ! tmux has-session -t gigafile 2>/dev/null; then
     mkdir -p "$SHOGI_DATA/teachers/distilled"
     tmux new-session -d -s gigafile "( bash '$WORK/rshogi/infra/vast/gigafile_dl.sh' \
         -o '$SHOGI_DATA/teachers/distilled' ${GIGAFILE_DLKEY:+-k \"\$GIGAFILE_DLKEY\"} \
-        \$GIGAFILE_URLS && touch '$(marker gigafile)' ) 2>&1 | tee '$WORK/logs/gigafile.log'; sleep 5"
+        \$GIGAFILE_URLS && \
+        python3 '$WORK/rshogi/infra/vast/extract_stored_zips.py' \
+          '$SHOGI_DATA/teachers/distilled' --remove-zips && \
+        touch '$(marker gigafile)' ) 2>&1 | tee '$WORK/logs/gigafile.log'; sleep 5"
     echo "[onstart] gigafile download started"
 fi
 
@@ -148,7 +154,7 @@ fi
 cat <<EOF
 [onstart] kicked. 状態確認:
   tail -f /workspace/onstart.log
-  tmux ls                      # hfdl / build_rshogi / build_tatara / build_shogitest
+  tmux ls                      # hfdl / gigafile / build_rshogi / build_tatara / build_shogitest
   ls /workspace/.onstart/      # 完了 marker
 残る手動ステップ (イメージ/onstart に入れられないもの):
   1. ponkotsu.onnx  -> $SHOGI_DATA/nnue/       (scp)
