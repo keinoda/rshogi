@@ -4,7 +4,9 @@
 # marker (/workspace/.onstart/) で確認。ビルド/DL は tmux セッションで並列に走る。
 #
 # vast テンプレートの Environment Variables で挙動を制御する:
-#   GIT_TOKEN        : private repo clone 用 GitHub PAT (必須: keinoda/rshogi が private の場合)
+#   GIT_TOKEN        : GitHub PAT (省略可)。対象 4 repo (rshogi / tatara / shogitest /
+#                      yaneuraou) は全て public のため通常は不要。private repo を使う
+#                      構成に変えた場合のみ read-only fine-grained PAT を設定する
 #   RSHOGI_BRANCH    : 既定 claude/busy-faraday-umwgl8
 #   TATARA_BRANCH    : 既定 main (net_to_yo 汎用化を使うなら claude/net-to-yo-dims-generic)
 #   SHOGITEST_BRANCH : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)

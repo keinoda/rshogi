@@ -38,7 +38,7 @@ Change visibility）。vast.ai が匿名 pull できるようにするため。�
 
 | 変数 | 意味 | 既定 |
 |---|---|---|
-| `GIT_TOKEN` | private repo clone 用 GitHub PAT。read-only の fine-grained PAT を対象 repo 限定で発行し、不要になったら revoke | なし |
+| `GIT_TOKEN` | GitHub PAT（**通常不要** — 対象 4 repo は全て public。private repo を使う構成に変えた場合のみ、read-only の fine-grained PAT を対象 repo 限定で発行して設定し、不要になったら revoke） | なし |
 | `RSHOGI_BRANCH` | rshogi のブランチ | `claude/busy-faraday-umwgl8` |
 | `TATARA_BRANCH` | tatara のブランチ | `main` |
 | `SHOGITEST_BRANCH` | shogitest のブランチ | `claude/nightly-toolchain-pin` |
