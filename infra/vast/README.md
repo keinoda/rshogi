@@ -72,6 +72,14 @@ gigafile の zip（無圧縮 STORED）は DL 完了後に `extract_stored_zips.p
 それでも国内リージョンからのアクセスより桁で遅いことがあるので、
 急ぐ場合は国内の VM 経由で HF 等へ退避するのが確実。
 
+**国内リレー（gigafile → HF 退避）**: `relay_gigafile_to_hf.sh` を国内 VM
+（OCI 東京の Always Free 等）で回すと、zip 1 本 DL → メンバー単位で展開・検証 →
+HF dataset へ upload → 削除、をディスク ~120GB のピークで完走できる
+（無料枠 200GB に収まる）。ledger + スタンプで中断・再実行に耐える。
+退避後の vast 側は `hf download <repo> --repo-type dataset --local-dir
+$SHOGI_DATA/teachers/distilled` で取得し、`GIGAFILE_URLS` は**設定しない**こと
+（設定すると gigafile から再取得しようとする）。
+
 ## 起動後の確認
 
 ```bash
