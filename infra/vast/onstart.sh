@@ -10,8 +10,11 @@
 #   RSHOGI_BRANCH    : 既定 claude/busy-faraday-umwgl8
 #   TATARA_BRANCH    : 既定 main (net_to_yo 汎用化を使うなら claude/net-to-yo-dims-generic)
 #   SHOGITEST_BRANCH : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)
-#   DOWNLOAD_SHARDS  : 既定 "000 001 002" (パイロット分)。"all" で全 34 shard、"none" で DL しない
 #   HF_DATASET       : 既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
+#
+# 教師データは常に全量 (34 shard / 679GB) をダウンロードする。実績あるデータセットで
+# 全量使うことが確定しているため、shard 小出しで後から待つ時間を作らない。
+# 止めたい場合は `tmux kill-session -t hfdl`。中断後の再実行は resume される。
 
 set -uo pipefail
 mkdir -p /workspace/.onstart
@@ -28,7 +31,6 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 RSHOGI_BRANCH=${RSHOGI_BRANCH:-claude/busy-faraday-umwgl8}
 TATARA_BRANCH=${TATARA_BRANCH:-main}
 SHOGITEST_BRANCH=${SHOGITEST_BRANCH:-claude/nightly-toolchain-pin}
-DOWNLOAD_SHARDS=${DOWNLOAD_SHARDS:-"000 001 002"}
 HF_DATASET=${HF_DATASET:-washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique}
 
 mkdir -p "$SHOGI_DATA"/{teachers/pool,nnue,progress} \
@@ -64,19 +66,32 @@ if ! step_done repos; then
       && mark repos
 fi
 
-# ---------- 2. 教師データ DL (tmux, 並列) ----------
-if [ "$DOWNLOAD_SHARDS" != "none" ] && ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
-    if [ "$DOWNLOAD_SHARDS" = "all" ]; then
-        INCLUDE_ARGS=""
-    else
-        INCLUDE_ARGS=""
-        for s in $DOWNLOAD_SHARDS; do INCLUDE_ARGS="$INCLUDE_ARGS --include split_${s}.bin"; done
-    fi
+# ---------- 2. 教師データ DL (全量、tmux で並列) ----------
+if ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
     tmux new-session -d -s hfdl "hf download '$HF_DATASET' --repo-type dataset \
-        --local-dir '$SHOGI_DATA/teachers/pool' $INCLUDE_ARGS \
+        --local-dir '$SHOGI_DATA/teachers/pool' \
         2>&1 | tee '$WORK/logs/hfdl.log'; \
         touch '$(marker hfdl)'"
-    echo "[onstart] hf download started (shards: $DOWNLOAD_SHARDS)"
+    echo "[onstart] hf download started (full dataset)"
+fi
+
+# ---------- 2.5 progress.bin (keinoda/yaneuraou sojo_tsec7 branch の source/ から取得) ----------
+# 学習 (tatara --progress-coeff) とエンジン (LS_PROGRESS_COEFF) の両方で同一ファイルを使う。
+if [ ! -s "$SHOGI_DATA/progress/progress.bin" ]; then
+    if wget -q -O "$SHOGI_DATA/progress/progress.bin.tmp" \
+        "https://raw.githubusercontent.com/keinoda/yaneuraou/sojo_tsec7/source/progress.bin"; then
+        mv "$SHOGI_DATA/progress/progress.bin.tmp" "$SHOGI_DATA/progress/progress.bin"
+        SIZE=$(stat -c%s "$SHOGI_DATA/progress/progress.bin")
+        # progress8kpabs 係数は f64 LE x 125388 = 1,003,104 bytes (tatara docs/progress-bin)
+        if [ "$SIZE" != "1003104" ]; then
+            echo "[onstart] WARNING: progress.bin size=$SIZE (expected 1003104) — 形式を確認すること"
+        else
+            echo "[onstart] progress.bin fetched ($SIZE bytes)"
+        fi
+    else
+        rm -f "$SHOGI_DATA/progress/progress.bin.tmp"
+        echo "[onstart] WARNING: progress.bin の取得に失敗 (手動で配置すること)"
+    fi
 fi
 
 # ---------- 3. rshogi build (tmux): rescore/検証ツール + パイロット用 engine 2 種 ----------
@@ -123,7 +138,6 @@ cat <<EOF
   ls /workspace/.onstart/      # 完了 marker
 残る手動ステップ (イメージ/onstart に入れられないもの):
   1. ponkotsu.onnx  -> $SHOGI_DATA/nnue/       (scp)
-  2. progress.bin   -> $SHOGI_DATA/progress/    (scp)
-  3. 開始局面集      -> $WORK/book/openings.epd (scp)
+  2. 開始局面集      -> $WORK/book/openings.epd (scp)
 EOF
 echo "===== onstart end $(date -u +%FT%TZ) ====="

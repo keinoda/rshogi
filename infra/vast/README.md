@@ -31,7 +31,7 @@ Change visibility）。vast.ai が匿名 pull できるようにするため。�
 | Docker Image | `ghcr.io/keinoda/shogi-lab:cuda129-trt1011` |
 | Launch Mode | ssh |
 | On-start Script | `onstart.sh` の中身を貼り付け |
-| Disk | パイロット: 300GB 以上 / 全量蒸留まで見据えるなら 2.5TB+ |
+| Disk | **1TB 以上**（全量 679GB + パイロット作業分。全量蒸留まで進むなら 2.5TB+） |
 | GPU フィルタ | Max CUDA 12.8 以上の host（TensorRT 10.11 は cuda-12.9 ビルド）。RTX 4090 / 5090 推奨 |
 
 ### Environment Variables（テンプレートの環境変数欄）
@@ -42,7 +42,10 @@ Change visibility）。vast.ai が匿名 pull できるようにするため。�
 | `RSHOGI_BRANCH` | rshogi のブランチ | `claude/busy-faraday-umwgl8` |
 | `TATARA_BRANCH` | tatara のブランチ | `main` |
 | `SHOGITEST_BRANCH` | shogitest のブランチ | `claude/nightly-toolchain-pin` |
-| `DOWNLOAD_SHARDS` | DL する教師データ shard。`"000 001 002"`（パイロット 60GB）/ `all`（679GB）/ `none` | `000 001 002` |
+
+教師データは**常に全量（34 shard / 679GB）を自動ダウンロード**する（実績あるデータセットで
+全量使用が確定しているため、shard 小出しはしない）。止める場合は `tmux kill-session -t hfdl`、
+再開は onstart 再実行か同コマンドで resume される。
 
 ## 起動後の確認
 
@@ -54,11 +57,13 @@ ls /workspace/.onstart/            # 完了 marker
 
 ビルド群は 10〜20 分、shard 3 枚（60GB）は 1Gbps で 10〜15 分（並列実行）。
 
+progress.bin は onstart が keinoda/yaneuraou の `sojo_tsec7` ブランチ
+（`source/progress.bin`）から自動取得して `$SHOGI_DATA/progress/` に配置する。
+
 イメージにも onstart にも入れられないもの（scp で配置）:
 
 1. rescore 用 ONNX モデル → `$SHOGI_DATA/nnue/`
-2. progress.bin → `$SHOGI_DATA/progress/`
-3. 開始局面集 → `/workspace/book/openings.epd`
+2. 開始局面集 → `/workspace/book/openings.epd`
 
 ## 注意
 
