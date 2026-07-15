@@ -91,6 +91,39 @@ progress.bin は onstart が keinoda/yaneuraou の `sojo_tsec7` ブランチ
 2. rescore 用 ONNX モデル → `$SHOGI_DATA/nnue/`（**追い蒸留するときのみ必要**。
    パイロットでは不要 — 蒸留済みデータを直接学習に使う）
 
+## 段階学習ハーネス (staged_train.py)
+
+800 SB を一括予約せず「学習 → held-out 評価 → 延長判定 → resume」を自動で回す
+スーパーバイザ。tatara の `--resume`（optimizer 状態 + LR horizon 込みの真の resume）
+を使うため、**段階延長しても LR スケジュール（gamma^sb）は圧縮されず連続**する。
+
+```bash
+pip3 install --break-system-packages matplotlib   # レポート描画用 (無くても学習は可)
+tmux new -d -s train "python3 $WORK/rshogi/infra/vast/staged_train.py \
+  --data $SHOGI_DATA/teachers/<シャッフル済み学習PSV> \
+  --test-data $SHOGI_DATA/teachers/floodgate.bin \
+  --run-dir $WORK/runs/base2048 --gpu 0 \
+  2>&1 | tee $WORK/logs/staged_train.log"
+```
+
+- `batches-per-superbatch` は `round(N_train / (20 × batch_size))` を自動計算
+  （≈20 SB = 1 dataset pass。`--sbs-per-pass` で変更可）
+- 既定: 2048x16x64 / 9 buckets / v17 系ハイパラ固定 / ladder 120→200→300→400
+  （以後 +100）/ save-rate 10 / raw ckpt 8 個保持
+- 判定: 5点MA best が直近 10SB 内 → 延長、±0.1% 横ばい → +40SB を 1 回、
+  best から 20SB 以上 & 0.2% 悪化 → 停止（stage 途中でも abort）
+- milestone（各 stage 目標）と held-out 最良の raw ckpt は `protected/` に
+  hardlink され rolling 削除から保護。停止後は最良近傍の `.bin` を自己対局候補として列挙
+- `run-dir/report.html` / `report.png` を毎 SB 更新（passes 軸の loss + MA3/5、
+  LR、throughput、ETA、fp16 clamp、ckpt 位置。30 秒自動リロード）。閲覧は
+  `ssh -L 8000:localhost:8000 <instance>` + `python3 -m http.server 8000 -d $WORK/runs/base2048`
+- ハーネス自体も冪等（同一コマンド再実行で続きから）。tatara 異常終了は
+  resume で自動リトライ（`--retries`）
+
+**前提**: 学習 PSV は事前に全域シャッフルしておくこと（tatara の dataloader は
+シャッフルなしの逐次読み）。88 億全量なら `shuffle_psv --chunk-size` の一時領域
+込みで入力の 3 倍 ≈ 1.06TB を使うため、**シャッフルだけは 2TB ディスクで実施**する。
+
 ## 注意
 
 - TensorRT のエンジンコンパイルはモデル×GPU 固有のため事前化できない。初回の
