@@ -3,24 +3,29 @@
 # 冪等: 再起動時は完了済みステップを skip する。進捗は /workspace/onstart.log と
 # marker (/workspace/.onstart/) で確認。ビルド/DL は tmux セッションで並列に走る。
 #
-# vast テンプレートの Environment Variables で挙動を制御する:
-#   GIT_TOKEN        : GitHub PAT (省略可)。対象 4 repo (rshogi / tatara / shogitest /
-#                      yaneuraou) は全て public のため通常は不要。private repo を使う
-#                      構成に変えた場合のみ read-only fine-grained PAT を設定する
-#   RSHOGI_BRANCH    : 既定 claude/busy-faraday-umwgl8
-#   TATARA_BRANCH    : 既定 main (net_to_yo 汎用化を使うなら claude/net-to-yo-dims-generic)
-#   SHOGITEST_BRANCH : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)
-#   HF_DATASET       : 既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
-#   SKIP_HF          : 1 で HF プールの DL をスキップ (蒸留済みデータのみで作業する場合)
-#   GIGAFILE_URLS    : gigafile.nu の URL。複数は「カンマ区切り」推奨 (vast の環境変数欄は
-#                      スペースを含む値を quote なしでは受け付けない)。スペース区切りも可。
-#                      指定時は蒸留済み教師データを $SHOGI_DATA/teachers/distilled/ へ
-#                      ダウンロードし、zip を展開・検証後に削除する (extract_stored_zips.py)
-#   GIGAFILE_DLKEY   : gigafile のダウンロードキー (設定されている場合のみ)
+# 教師データは HF の公開 dataset から取得する (8Gbps 回線なら 352GB ≈ 1 時間弱):
+#   - 蒸留済み (ponkotsu 再評価済み 88.0 億局面 / 352GB) -> teachers/distilled/
+#   - 元ラベル (蒸留元 dataset。パイロット run C の対照用 3 ファイル / 59GB) -> teachers/orig/
 #
-# 教師データは常に全量 (34 shard / 679GB) をダウンロードする。実績あるデータセットで
-# 全量使うことが確定しているため、shard 小出しで後から待つ時間を作らない。
-# 止めたい場合は `tmux kill-session -t hfdl`。中断後の再実行は resume される。
+# vast テンプレートの Environment Variables (全て省略可):
+#   DISTILLED_DATASET : 蒸留済み教師データの HF dataset
+#                       既定 ngs436/dlsuisho-ponkotsu-distilled
+#   SKIP_DISTILLED    : 1 で蒸留済みデータの DL をスキップ
+#   ORIG_DATASET      : 元ラベル (蒸留元) の HF dataset
+#                       既定 washiun/Knowledge_distilled_dataset_by_DLSuisho15b_unique
+#   ORIG_INCLUDE      : 元ラベルから取得するファイル (空白/カンマ区切り、glob 可)。
+#                       既定はパイロット run C 用の dlsuisho_unique_001..003.bin。
+#                       残り 40% の追い蒸留 (rescore) をやる場合は 019..030 を指定、
+#                       全量なら '*.bin' (587GB)。空文字で DL しない
+#   SKIP_ORIG         : 1 で元ラベルデータの DL をスキップ
+#   HF_POOL           : 1 で add_aobazero プール (HF_DATASET) を全量 DL する
+#                       (既定オフ。将来の教師データ増強用に経路だけ残置)
+#   HF_DATASET        : HF_POOL=1 のときの対象 dataset
+#                       既定 washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique
+#   GIT_TOKEN         : GitHub PAT (省略可。対象 repo は全て public)
+#   RSHOGI_BRANCH     : 既定 claude/busy-faraday-umwgl8
+#   TATARA_BRANCH     : 既定 main (net_to_yo 汎用化を使うなら claude/net-to-yo-dims-generic)
+#   SHOGITEST_BRANCH  : 既定 claude/nightly-toolchain-pin (main へ merge 済みなら main)
 
 set -uo pipefail
 mkdir -p /workspace/.onstart
@@ -37,16 +42,15 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 RSHOGI_BRANCH=${RSHOGI_BRANCH:-claude/busy-faraday-umwgl8}
 TATARA_BRANCH=${TATARA_BRANCH:-main}
 SHOGITEST_BRANCH=${SHOGITEST_BRANCH:-claude/nightly-toolchain-pin}
+DISTILLED_DATASET=${DISTILLED_DATASET:-ngs436/dlsuisho-ponkotsu-distilled}
+ORIG_DATASET=${ORIG_DATASET:-washiun/Knowledge_distilled_dataset_by_DLSuisho15b_unique}
+ORIG_INCLUDE=${ORIG_INCLUDE:-dlsuisho_unique_001.bin dlsuisho_unique_002.bin dlsuisho_unique_003.bin}
 HF_DATASET=${HF_DATASET:-washiun/Knowledge_distilled_by_DLSuisho15b_add_aobazero_unique}
 
-# GIGAFILE_URLS の正規化: カンマ区切り → スペース区切りへ変換し、UI 経由で値に
-# 混入しがちな引用符も除去する (下の tmux セッションが env 経由で参照するため export)
-if [ -n "${GIGAFILE_URLS:-}" ]; then
-    GIGAFILE_URLS=$(printf '%s' "$GIGAFILE_URLS" | tr -d '"' | tr -d "'" | tr ',' ' ')
-    export GIGAFILE_URLS
-fi
+# UI 経由で混入しがちな引用符の除去とカンマ→スペース正規化
+ORIG_INCLUDE=$(printf '%s' "$ORIG_INCLUDE" | tr -d '"' | tr -d "'" | tr ',' ' ')
 
-mkdir -p "$SHOGI_DATA"/{teachers/pool,nnue,progress} \
+mkdir -p "$SHOGI_DATA"/{teachers/distilled,teachers/orig,teachers/pool,nnue,progress} \
          "$WORK"/{pilot,logs,book,trt_g0} "$WORK/pilot"/{rescored,logs}
 
 service ssh start 2>/dev/null || true
@@ -79,30 +83,36 @@ if ! step_done repos; then
       && mark repos
 fi
 
-# ---------- 2. 教師データ DL (全量、tmux で並列) ----------
-if [ "${SKIP_HF:-0}" != "1" ] && ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
-    tmux new-session -d -s hfdl "hf download '$HF_DATASET' --repo-type dataset \
-        --local-dir '$SHOGI_DATA/teachers/pool' \
-        2>&1 | tee '$WORK/logs/hfdl.log'; \
-        touch '$(marker hfdl)'"
-    echo "[onstart] hf download started (full dataset)"
+# ---------- 2.1 蒸留済み教師データ (HF、全量 352GB) ----------
+# .bin 19 本 (dlsuisho_unique_001..019) が揃って完了。アップロード途中の dataset を
+# 引いた場合は marker を置かず警告する (onstart 再実行で hf download が差分 resume する)。
+if [ "${SKIP_DISTILLED:-0}" != "1" ] && ! step_done distdl && ! tmux has-session -t distdl 2>/dev/null; then
+    tmux new-session -d -s distdl "( hf download '$DISTILLED_DATASET' --repo-type dataset \
+        --local-dir '$SHOGI_DATA/teachers/distilled' && \
+        N=\$(find '$SHOGI_DATA/teachers/distilled' -maxdepth 1 -name '*.bin' | wc -l) && \
+        echo \"[distdl] .bin: \$N 本\" && \
+        if [ \"\$N\" -ge 19 ]; then touch '$(marker distdl)'; else \
+          echo '[distdl] WARNING: .bin が 19 本未満。HF 側のアップロード完了を確認して onstart を再実行すること'; fi \
+        ) 2>&1 | tee '$WORK/logs/distdl.log'; sleep 5"
+    echo "[onstart] distilled download started ($DISTILLED_DATASET)"
 fi
 
-# ---------- 2.3 蒸留済み教師データ (gigafile.nu、GIGAFILE_URLS 指定時) ----------
-# gigafile のリンクには保持期限があるため、受領したら速やかに落とすこと。
-# DL → zip 展開 (CRC/サイズ/40B 境界検証) → 検証済み zip の削除 まで自動で行う。
-# zip を 1 本ずつ展開後に消すので、ピークディスクは「zip 全量 + 展開 1 本分」(~450GB) に収まる。
-if [ -n "${GIGAFILE_URLS:-}" ] && ! step_done gigafile && ! tmux has-session -t gigafile 2>/dev/null; then
-    mkdir -p "$SHOGI_DATA/teachers/distilled"
-    # 分割並列ダウンロードに aria2 を使う (イメージに未同梱の場合のみここで導入)
-    command -v aria2c >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq aria2; } || true
-    tmux new-session -d -s gigafile "( bash '$WORK/rshogi/infra/vast/gigafile_dl.sh' \
-        -o '$SHOGI_DATA/teachers/distilled' ${GIGAFILE_DLKEY:+-k \"\$GIGAFILE_DLKEY\"} \
-        \$GIGAFILE_URLS && \
-        python3 '$WORK/rshogi/infra/vast/extract_stored_zips.py' \
-          '$SHOGI_DATA/teachers/distilled' --remove-zips && \
-        touch '$(marker gigafile)' ) 2>&1 | tee '$WORK/logs/gigafile.log'; sleep 5"
-    echo "[onstart] gigafile download started"
+# ---------- 2.2 元ラベル教師データ (HF、run C 対照用) ----------
+if [ "${SKIP_ORIG:-0}" != "1" ] && [ -n "$ORIG_INCLUDE" ] && ! step_done origdl && ! tmux has-session -t origdl 2>/dev/null; then
+    tmux new-session -d -s origdl "( hf download '$ORIG_DATASET' --repo-type dataset \
+        --include $ORIG_INCLUDE \
+        --local-dir '$SHOGI_DATA/teachers/orig' && \
+        touch '$(marker origdl)' ) 2>&1 | tee '$WORK/logs/origdl.log'; sleep 5"
+    echo "[onstart] orig-label download started ($ORIG_DATASET: $ORIG_INCLUDE)"
+fi
+
+# ---------- 2.4 add_aobazero プール全量 DL (HF_POOL=1 のときのみ、既定オフ) ----------
+# 将来の教師データ増強用に経路だけ残置。全量 679GB のためディスクは 2TB 級が必要。
+if [ "${HF_POOL:-0}" = "1" ] && ! step_done hfdl && ! tmux has-session -t hfdl 2>/dev/null; then
+    tmux new-session -d -s hfdl "( hf download '$HF_DATASET' --repo-type dataset \
+        --local-dir '$SHOGI_DATA/teachers/pool' && \
+        touch '$(marker hfdl)' ) 2>&1 | tee '$WORK/logs/hfdl.log'; sleep 5"
+    echo "[onstart] hf pool download started ($HF_DATASET)"
 fi
 
 # ---------- 2.5 progress.bin (keinoda/yaneuraou sojo_tsec7 branch の source/ から取得) ----------
@@ -164,10 +174,11 @@ fi
 cat <<EOF
 [onstart] kicked. 状態確認:
   tail -f /workspace/onstart.log
-  tmux ls                      # hfdl / gigafile / build_rshogi / build_tatara / build_shogitest
+  tmux ls                      # distdl / origdl / build_rshogi / build_tatara / build_shogitest
   ls /workspace/.onstart/      # 完了 marker
+  tail -f /workspace/logs/distdl.log   # 蒸留済みデータ DL の進行
 残る手動ステップ (イメージ/onstart に入れられないもの):
-  1. ponkotsu.onnx  -> $SHOGI_DATA/nnue/       (scp)
-  2. 開始局面集      -> $WORK/book/openings.epd (scp)
+  1. 開始局面集 -> $WORK/book/openings.epd (scp)
+  2. ponkotsu.onnx -> $SHOGI_DATA/nnue/ (scp。追い蒸留するときのみ必要)
 EOF
 echo "===== onstart end $(date -u +%FT%TZ) ====="
