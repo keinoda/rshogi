@@ -94,6 +94,8 @@ fi
 # zip を 1 本ずつ展開後に消すので、ピークディスクは「zip 全量 + 展開 1 本分」(~450GB) に収まる。
 if [ -n "${GIGAFILE_URLS:-}" ] && ! step_done gigafile && ! tmux has-session -t gigafile 2>/dev/null; then
     mkdir -p "$SHOGI_DATA/teachers/distilled"
+    # 分割並列ダウンロードに aria2 を使う (イメージに未同梱の場合のみここで導入)
+    command -v aria2c >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq aria2; } || true
     tmux new-session -d -s gigafile "( bash '$WORK/rshogi/infra/vast/gigafile_dl.sh' \
         -o '$SHOGI_DATA/teachers/distilled' ${GIGAFILE_DLKEY:+-k \"\$GIGAFILE_DLKEY\"} \
         \$GIGAFILE_URLS && \

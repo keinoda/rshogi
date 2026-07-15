@@ -19,7 +19,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # --- 基本パッケージ + SSH (vast の SSH 接続に必要) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git tmux curl wget ca-certificates xz-utils \
+        git tmux curl wget aria2 ca-certificates xz-utils unzip \
         python3-pip python3-venv \
         build-essential pkg-config libssl-dev \
         openssh-server htop lsb-release software-properties-common gnupg \
